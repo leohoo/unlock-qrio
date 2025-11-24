@@ -1,0 +1,9 @@
+# Sony RC-S380 NFC Reader
+# Place this file in /etc/udev/rules.d/
+# Then run: sudo udevadm control --reload-rules && sudo udevadm trigger
+
+# Sony RC-S380 (Product ID 06c3)
+SUBSYSTEM=="usb", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="06c3", MODE="0666", GROUP="plugdev"
+
+# Alternative: Allow access for specific user group
+# SUBSYSTEM=="usb", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="06c3", MODE="0660", GROUP="plugdev"

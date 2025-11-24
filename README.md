@@ -80,11 +80,15 @@ You can also specify a custom config file:
 ./rfid_trigger.py --config /path/to/config.json --daemon
 ```
 
-### Running as a Service
+### Running as a Service (Systemd)
 
-To run the RFID trigger daemon automatically on system startup, you can create a systemd service (Linux) or launchd service (macOS).
+To run the RFID trigger daemon automatically on system startup, create a systemd service.
 
-**Example systemd service** (`/etc/systemd/system/qrio-rfid.service`):
+#### Option 1: Using Virtual Environment (Recommended)
+
+If you're using `uv` or `venv`, use the Python interpreter from your virtual environment:
+
+**Create service file** (`/etc/systemd/system/qrio-rfid.service`):
 ```ini
 [Unit]
 Description=Qrio RFID Trigger Daemon
@@ -93,18 +97,138 @@ After=network.target
 [Service]
 Type=simple
 User=YOUR_USERNAME
-WorkingDirectory=/path/to/unlock-qrio
-ExecStart=/usr/bin/python3 /path/to/unlock-qrio/rfid_trigger.py --daemon
+WorkingDirectory=/home/YOUR_USERNAME/unlock-qrio
+# Use the Python from your virtual environment
+ExecStart=/home/YOUR_USERNAME/unlock-qrio/.venv/bin/python3 /home/YOUR_USERNAME/unlock-qrio/rfid_trigger.py --daemon
 Restart=always
+RestartSec=10
+
+# Optional: Set up proper logging
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-Enable and start:
+**Setup steps:**
 ```bash
+# 1. Create virtual environment (if not already done)
+cd /home/YOUR_USERNAME/unlock-qrio
+python3 -m venv .venv
+# or with uv:
+# uv venv
+
+# 2. Install dependencies in venv
+source .venv/bin/activate
+pip install -r requirements.txt
+# or with uv:
+# uv pip install -r requirements.txt
+deactivate
+
+# 3. Create the service file
+sudo nano /etc/systemd/system/qrio-rfid.service
+# (paste the content above, update YOUR_USERNAME)
+
+# 4. Enable and start the service
+sudo systemctl daemon-reload
 sudo systemctl enable qrio-rfid
 sudo systemctl start qrio-rfid
+
+# 5. Check status
+sudo systemctl status qrio-rfid
+
+# 6. View logs
+sudo journalctl -u qrio-rfid -f
+```
+
+#### Option 2: Using System Python
+
+If you installed dependencies system-wide:
+
+```ini
+[Unit]
+Description=Qrio RFID Trigger Daemon
+After=network.target
+
+[Service]
+Type=simple
+User=YOUR_USERNAME
+WorkingDirectory=/home/YOUR_USERNAME/unlock-qrio
+ExecStart=/usr/bin/python3 /home/YOUR_USERNAME/unlock-qrio/rfid_trigger.py --daemon
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+```
+
+#### Useful Commands
+
+```bash
+# Start service
+sudo systemctl start qrio-rfid
+
+# Stop service
+sudo systemctl stop qrio-rfid
+
+# Restart service
+sudo systemctl restart qrio-rfid
+
+# Check status
+sudo systemctl status qrio-rfid
+
+# View logs (live)
+sudo journalctl -u qrio-rfid -f
+
+# View recent logs
+sudo journalctl -u qrio-rfid -n 50
+
+# Disable autostart
+sudo systemctl disable qrio-rfid
+```
+
+#### Viewing Logs
+
+The daemon logs all events to syslog, whether running as a service or manually.
+
+**When running as a systemd service:**
+```bash
+# View systemd service logs (includes both console and syslog output)
+sudo journalctl -u qrio-rfid -f
+
+# View only syslog entries
+sudo tail -f /var/log/syslog | grep qrio-rfid
+```
+
+**When running manually** (e.g., `./rfid_trigger.py --daemon`):
+```bash
+# View syslog in real-time (in another terminal)
+sudo tail -f /var/log/syslog | grep qrio-rfid
+
+# View recent syslog entries
+sudo grep qrio-rfid /var/log/syslog | tail -20
+```
+
+Note: Console output appears in your terminal when running manually, **and** simultaneously logs to syslog.
+
+**Events logged to syslog:**
+- Daemon start/stop
+- NFC reader connection
+- Authorized card detection (with card ID)
+- Unauthorized card detection (with card ID)
+- Unlock success/failure
+- Cooldown events
+- Errors and warnings
+
+**Example syslog output:**
+```
+Nov 24 10:30:15 raspberrypi qrio-rfid[1234]: Qrio RFID Trigger Daemon started
+Nov 24 10:30:15 raspberrypi qrio-rfid[1234]: Connected to NFC reader: usb:054c:06c3
+Nov 24 10:35:22 raspberrypi qrio-rfid[1234]: Authorized card detected: 01234567890ABCDEF
+Nov 24 10:35:23 raspberrypi qrio-rfid[1234]: Unlock successful for card: 01234567890ABCDEF
+Nov 24 10:35:28 raspberrypi qrio-rfid[1234]: Authorized card in cooldown: 01234567890ABCDEF (2s remaining)
+Nov 24 10:40:10 raspberrypi qrio-rfid[1234]: Unauthorized card detected: FEDCBA0987654321
 ```
 
 ## How It Works
@@ -163,17 +287,49 @@ sudo systemctl start qrio-rfid
 - Adjust `UI_FINAL_PATH` in `unlock_qrio.py` if needed
 - Script falls back to coordinates (360, 684) if button not found
 
-### Linux USB Permissions
+### Linux/Raspberry Pi USB Permissions
 
-Create udev rule for RC-S380:
+If you get `[Errno 19] No such device` error, you need to set up USB permissions.
 
+**Quick test (run as root):**
 ```bash
-# Create file: /etc/udev/rules.d/99-nfc.rules
-SUBSYSTEM=="usb", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="06c3", MODE="0666"
+sudo python3 rfid_trigger.py --scan
+```
 
-# Reload rules
-sudo udevadm control --reload-rules
-sudo udevadm trigger
+**Permanent fix (recommended):**
+
+1. Copy the included udev rules file:
+   ```bash
+   sudo cp 99-nfc-rc-s380.rules /etc/udev/rules.d/
+   ```
+
+2. Add your user to the `plugdev` group:
+   ```bash
+   sudo usermod -a -G plugdev $USER
+   ```
+
+3. Reload udev rules:
+   ```bash
+   sudo udevadm control --reload-rules
+   sudo udevadm trigger
+   ```
+
+4. **Reboot or replug the USB device** for changes to take effect
+
+5. Test without sudo:
+   ```bash
+   python3 rfid_trigger.py --scan
+   ```
+
+**Manual setup (if you don't have the rules file):**
+```bash
+# Create file: /etc/udev/rules.d/99-nfc-rc-s380.rules
+sudo bash -c 'cat > /etc/udev/rules.d/99-nfc-rc-s380.rules << EOF
+# Sony RC-S380 NFC Reader
+SUBSYSTEM=="usb", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="06c3", MODE="0666", GROUP="plugdev"
+EOF'
+
+# Then follow steps 2-5 above
 ```
 
 ## Configuration Options

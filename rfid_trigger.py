@@ -8,6 +8,7 @@ import sys
 import time
 import json
 import signal
+import syslog
 from pathlib import Path
 from typing import Set, Optional
 from datetime import datetime
@@ -118,6 +119,10 @@ def run_daemon(auth_cards: AuthorizedCards):
     Run the RFID trigger daemon.
     Continuously monitors for NFC cards and triggers unlock for authorized ones.
     """
+    # Initialize syslog
+    syslog.openlog('qrio-rfid', syslog.LOG_PID, syslog.LOG_DAEMON)
+    syslog.syslog(syslog.LOG_INFO, "Qrio RFID Trigger Daemon started")
+
     print("🔓 Qrio RFID Trigger Daemon")
     print("=" * 52)
     print(f"Monitoring for NFC cards (cooldown: {COOLDOWN_SECONDS}s)...")
@@ -135,12 +140,15 @@ def run_daemon(auth_cards: AuthorizedCards):
     try:
         clf = nfc.ContactlessFrontend('usb')
         print(f"✅ Connected to NFC reader: {clf.device}\n")
+        syslog.syslog(syslog.LOG_INFO, f"Connected to NFC reader: {clf.device}")
     except Exception as e:
-        print(f"❌ Error: Could not connect to NFC reader: {e}")
+        error_msg = f"Could not connect to NFC reader: {e}"
+        print(f"❌ Error: {error_msg}")
         print("\nTroubleshooting:")
         print("  1. Make sure the Sony RC-S380 is connected via USB")
         print("  2. Check USB permissions (you may need to run as root or add udev rules)")
         print("  3. Run 'python3 -m nfc' to test the connection")
+        syslog.syslog(syslog.LOG_ERR, error_msg)
         sys.exit(1)
 
     try:
@@ -162,22 +170,29 @@ def run_daemon(auth_cards: AuthorizedCards):
                     if current_time - last_unlock_time >= COOLDOWN_SECONDS:
                         print(f"[{timestamp}] ✅ Authorized card: {card_id}")
                         print("🔓 Triggering unlock...")
+                        syslog.syslog(syslog.LOG_INFO, f"Authorized card detected: {card_id}")
 
                         try:
                             success = unlock_qrio_lock(verbose=False)
                             if success:
                                 print("✅ Unlock successful!\n")
+                                syslog.syslog(syslog.LOG_INFO, f"Unlock successful for card: {card_id}")
                                 last_unlock_time = current_time
                             else:
                                 print("❌ Unlock failed!\n")
+                                syslog.syslog(syslog.LOG_WARNING, f"Unlock failed for card: {card_id}")
                         except Exception as e:
+                            error_msg = f"Error during unlock for card {card_id}: {e}"
                             print(f"❌ Error during unlock: {e}\n")
+                            syslog.syslog(syslog.LOG_ERR, error_msg)
                     else:
                         remaining = int(COOLDOWN_SECONDS - (current_time - last_unlock_time))
                         print(f"[{timestamp}] ⏳ Card detected but in cooldown ({remaining}s remaining)")
+                        syslog.syslog(syslog.LOG_INFO, f"Authorized card in cooldown: {card_id} ({remaining}s remaining)")
                 else:
                     print(f"[{timestamp}] ⚠️  Unauthorized card: {card_id}")
                     print(f"   Use '--add-card {card_id}' to authorize\n")
+                    syslog.syslog(syslog.LOG_WARNING, f"Unauthorized card detected: {card_id}")
 
             time.sleep(0.1)  # Small delay to prevent CPU spinning
 
@@ -186,7 +201,9 @@ def run_daemon(auth_cards: AuthorizedCards):
     finally:
         if stop_flag['stop']:
             print("\n\n👋 Daemon stopped")
+            syslog.syslog(syslog.LOG_INFO, "Qrio RFID Trigger Daemon stopped")
         clf.close()
+        syslog.closelog()
 
 
 def scan_mode():

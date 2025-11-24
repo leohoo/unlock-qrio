@@ -50,6 +50,7 @@ Event-driven daemon for RFID-triggered unlock:
 5. **Event Loop**: Continuously monitors for NFC card/phone presence
 6. **Cooldown Mechanism**: Prevents rapid repeated unlocks (5 seconds default)
 7. **Card Management**: CLI commands for adding/removing/listing authorized cards
+8. **Syslog Integration**: Logs all events to syslog for system monitoring and auditing
 
 **Design Decisions**:
 - Imports `unlock_qrio_lock()` function from core module (no code duplication)
@@ -58,6 +59,11 @@ Event-driven daemon for RFID-triggered unlock:
 - Card IDs stored as uppercase hex strings for consistency
 - Scan mode (`--scan`) for discovering card IDs without triggering unlock
 - Supports Android phones with Mobile Suica/FeliCa apps (stable IDm)
+- Uses Python's built-in `syslog` module for system logging
+  - Logs to `LOG_DAEMON` facility with program name `qrio-rfid`
+  - Includes PID in logs via `LOG_PID` flag
+  - Uses appropriate severity levels: `LOG_INFO`, `LOG_WARNING`, `LOG_ERR`
+  - All card detection and unlock events are logged for auditing
 
 ## Prerequisites
 

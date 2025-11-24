@@ -1,0 +1,22 @@
+[Unit]
+Description=Qrio RFID Trigger Daemon
+After=network.target
+
+[Service]
+Type=simple
+# Replace YOUR_USERNAME with your actual username (e.g., pi)
+User=YOUR_USERNAME
+# Replace with the actual path to your project directory
+WorkingDirectory=/home/YOUR_USERNAME/unlock-qrio
+# Use the Python interpreter from your virtual environment
+# If using uv or venv, the path should be: /path/to/project/.venv/bin/python3
+ExecStart=/home/YOUR_USERNAME/unlock-qrio/.venv/bin/python3 /home/YOUR_USERNAME/unlock-qrio/rfid_trigger.py --daemon
+Restart=always
+RestartSec=10
+
+# Logging configuration
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
