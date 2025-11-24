@@ -23,6 +23,12 @@ TMP_CURRENT = "/tmp/ui_current.xml"
 TMP_PREVIOUS = "/tmp/ui_previous.xml"
 UI_FINAL_PATH = Path.home() / "sandbox/playground/ui_final.xml"
 
+# Timing configuration (in seconds)
+SLEEP_AFTER_WAKE = 0.3      # Wait after waking device (default: 0.5)
+SLEEP_AFTER_SWIPE = 0.3     # Wait after unlock swipe (default: 0.5)
+SLEEP_AFTER_LAUNCH = 1.0    # Wait after launching app (default: 2.0)
+SLEEP_BETWEEN_DUMPS = 0.5   # Wait between UI dumps (default: 1.0)
+
 
 def run_adb_command(args: list, check: bool = True, capture_output: bool = False) -> subprocess.CompletedProcess:
     """Run an ADB command with the given arguments."""
@@ -41,11 +47,11 @@ def wake_device():
     """Wake up the device and unlock the screen."""
     print("📲 Waking up device...")
     run_adb_command(["shell", "input", "keyevent", "KEYCODE_WAKEUP"])
-    time.sleep(0.5)
+    time.sleep(SLEEP_AFTER_WAKE)
 
     # Unlock screen (swipe up)
     run_adb_command(["shell", "input", "swipe", "500", "1500", "500", "500"])
-    time.sleep(0.5)
+    time.sleep(SLEEP_AFTER_SWIPE)
 
 
 def launch_qrio_app():
@@ -58,7 +64,7 @@ def launch_qrio_app():
         "-n", QRIO_MAIN_ACTIVITY,
         "-f", "0x20000000"  # FLAG_ACTIVITY_SINGLE_TOP
     ])
-    time.sleep(2)
+    time.sleep(SLEEP_AFTER_LAUNCH)
 
 
 def dump_ui_to_file() -> bool:
@@ -91,7 +97,7 @@ def wait_for_ui_to_settle() -> bool:
     for i in range(1, MAX_ATTEMPTS + 1):
         if not dump_ui_to_file():
             print(f"   ⚠️  Failed to dump UI (attempt {i}/{MAX_ATTEMPTS})")
-            time.sleep(1)
+            time.sleep(SLEEP_BETWEEN_DUMPS)
             continue
 
         if i > 1:
@@ -111,7 +117,7 @@ def wait_for_ui_to_settle() -> bool:
 
         # Copy current to previous for next iteration
         shutil.copy(TMP_CURRENT, TMP_PREVIOUS)
-        time.sleep(1)
+        time.sleep(SLEEP_BETWEEN_DUMPS)
 
     print("⚠️  Warning: UI may not be fully settled, proceeding anyway...")
     return False
@@ -192,53 +198,115 @@ def save_final_ui_dump():
         print(f"   ⚠️  Could not save final UI dump: {e}")
 
 
-def main():
-    """Main execution flow."""
-    print("🔓 Qrio Smart Lock Unlock Script (with UI settling)")
-    print("=" * 52)
+def unlock_qrio_lock(verbose: bool = True) -> bool:
+    """
+    Unlock the Qrio smart lock via ADB.
+
+    Args:
+        verbose: If True, prints status messages. If False, runs silently.
+
+    Returns:
+        True if unlock was successful, False otherwise.
+
+    Raises:
+        RuntimeError: If no ADB device is connected.
+    """
+    if verbose:
+        print("🔓 Unlocking Qrio Smart Lock...")
 
     # Check if device is connected
-    print("📱 Checking for connected devices...")
     if not check_device_connected():
-        print("❌ Error: No device connected.")
-        sys.exit(1)
-
-    print("✅ Device connected")
+        raise RuntimeError("No ADB device connected")
 
     try:
         # Wake up device and unlock screen
-        wake_device()
+        if verbose:
+            wake_device()
+        else:
+            run_adb_command(["shell", "input", "keyevent", "KEYCODE_WAKEUP"])
+            time.sleep(SLEEP_AFTER_WAKE)
+            run_adb_command(["shell", "input", "swipe", "500", "1500", "500", "500"])
+            time.sleep(SLEEP_AFTER_SWIPE)
 
         # Launch Qrio app
-        launch_qrio_app()
+        if verbose:
+            launch_qrio_app()
+        else:
+            run_adb_command([
+                "shell", "am", "start",
+                "-n", QRIO_MAIN_ACTIVITY,
+                "-f", "0x20000000"
+            ], capture_output=True)
+            time.sleep(SLEEP_AFTER_LAUNCH)
 
         # Wait for UI to settle
-        wait_for_ui_to_settle()
+        if verbose:
+            wait_for_ui_to_settle()
+        else:
+            # Silent version
+            stable_count = 0
+            for i in range(1, MAX_ATTEMPTS + 1):
+                if not dump_ui_to_file():
+                    time.sleep(SLEEP_BETWEEN_DUMPS)
+                    continue
+                if i > 1 and files_are_identical(TMP_PREVIOUS, TMP_CURRENT):
+                    stable_count += 1
+                    if stable_count >= REQUIRED_STABLE:
+                        break
+                else:
+                    stable_count = 0
+                shutil.copy(TMP_CURRENT, TMP_PREVIOUS)
+                time.sleep(SLEEP_BETWEEN_DUMPS)
 
-        # Save final UI dump
-        save_final_ui_dump()
+        # Save final UI dump (always silent)
+        try:
+            UI_FINAL_PATH.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy(TMP_CURRENT, UI_FINAL_PATH)
+        except Exception:
+            pass
 
         # Analyze UI to find unlock button
-        print("🔍 Analyzing UI for unlock button...")
         coords = find_unlock_button()
 
         if coords:
             x, y = coords
-            print(f"✅ Found unlock button at: {x} {y}")
+            if verbose:
+                print(f"✅ Found unlock button at: {x} {y}")
             tap_unlock_button(x, y)
         else:
             # Fallback to default coordinates
-            print("⚠️  Using default coordinates (360, 684)")
-            tap_unlock_button(360, 684)
+            if verbose:
+                print("⚠️  Using default coordinates (360, 684)")
+            run_adb_command(["shell", "input", "tap", "360", "684"])
 
+        if verbose:
+            print("✅ Unlock command sent!")
+
+        return True
+
+    except Exception as e:
+        if verbose:
+            print(f"❌ Error: {e}")
+        return False
+    finally:
+        # Always cleanup temporary files
+        cleanup()
+
+
+def main():
+    """Main execution flow for CLI usage."""
+    print("🔓 Qrio Smart Lock Unlock Script (with UI settling)")
+    print("=" * 52)
+
+    try:
+        unlock_qrio_lock(verbose=True)
         print()
         print("🎉 Done!")
         print()
         print(f"💡 Tip: Check {UI_FINAL_PATH} to see the final UI state")
-
-    finally:
-        # Always cleanup temporary files
-        cleanup()
+    except RuntimeError as e:
+        print(f"❌ Error: {e}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

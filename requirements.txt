@@ -1,0 +1,6 @@
+# NFC/RFID reader support (Sony RC-S380)
+nfcpy>=1.0.4
+
+# Note: nfcpy automatically installs these dependencies:
+# - libusb1>=1.6.4
+# - pyserial>=3.0
