@@ -1,0 +1,245 @@
+#!/usr/bin/env python3
+"""
+Qrio Smart Lock Unlock Script with UI settling detection.
+Waits for UI to stabilize before attempting unlock.
+"""
+
+import subprocess
+import sys
+import time
+import xml.etree.ElementTree as ET
+import re
+import shutil
+from pathlib import Path
+from typing import Optional, Tuple
+
+
+QRIO_PACKAGE = "me.qrio.smartlock2"
+QRIO_MAIN_ACTIVITY = "me.qrio.smartlock2/.presentation.lock.common.LockHomeActivity"
+MAX_ATTEMPTS = 10
+REQUIRED_STABLE = 2  # UI must be stable for 2 consecutive checks
+UI_DUMP_PATH = "/sdcard/ui_current.xml"
+TMP_CURRENT = "/tmp/ui_current.xml"
+TMP_PREVIOUS = "/tmp/ui_previous.xml"
+UI_FINAL_PATH = Path.home() / "sandbox/playground/ui_final.xml"
+
+
+def run_adb_command(args: list, check: bool = True, capture_output: bool = False) -> subprocess.CompletedProcess:
+    """Run an ADB command with the given arguments."""
+    cmd = ["adb"] + args
+    return subprocess.run(cmd, check=check, capture_output=capture_output, text=True)
+
+
+def check_device_connected() -> bool:
+    """Check if an Android device is connected via ADB."""
+    result = run_adb_command(["devices"], capture_output=True)
+    # Look for lines ending with "device" (not "unauthorized" or other states)
+    return any(line.strip().endswith("device") for line in result.stdout.splitlines()[1:])
+
+
+def wake_device():
+    """Wake up the device and unlock the screen."""
+    print("📲 Waking up device...")
+    run_adb_command(["shell", "input", "keyevent", "KEYCODE_WAKEUP"])
+    time.sleep(0.5)
+
+    # Unlock screen (swipe up)
+    run_adb_command(["shell", "input", "swipe", "500", "1500", "500", "500"])
+    time.sleep(0.5)
+
+
+def launch_qrio_app():
+    """Launch the Qrio Smart Lock app (reuses existing instance if already running)."""
+    print("🚀 Launching Qrio app...")
+    # Use FLAG_ACTIVITY_SINGLE_TOP (0x20000000) to reuse existing instance
+    # This prevents creating duplicate instances if the activity is already running
+    run_adb_command([
+        "shell", "am", "start",
+        "-n", QRIO_MAIN_ACTIVITY,
+        "-f", "0x20000000"  # FLAG_ACTIVITY_SINGLE_TOP
+    ])
+    time.sleep(2)
+
+
+def dump_ui_to_file() -> bool:
+    """Dump the current UI hierarchy to a file."""
+    try:
+        run_adb_command(
+            ["shell", "uiautomator", "dump", UI_DUMP_PATH],
+            capture_output=True
+        )
+        run_adb_command(["pull", UI_DUMP_PATH, TMP_CURRENT], capture_output=True)
+        return True
+    except subprocess.CalledProcessError:
+        return False
+
+
+def files_are_identical(file1: str, file2: str) -> bool:
+    """Check if two files are identical."""
+    try:
+        with open(file1, 'rb') as f1, open(file2, 'rb') as f2:
+            return f1.read() == f2.read()
+    except FileNotFoundError:
+        return False
+
+
+def wait_for_ui_to_settle() -> bool:
+    """Wait for the UI to stabilize by comparing consecutive UI dumps."""
+    print("⏳ Waiting for UI to settle...")
+    stable_count = 0
+
+    for i in range(1, MAX_ATTEMPTS + 1):
+        if not dump_ui_to_file():
+            print(f"   ⚠️  Failed to dump UI (attempt {i}/{MAX_ATTEMPTS})")
+            time.sleep(1)
+            continue
+
+        if i > 1:
+            # Compare with previous dump
+            if files_are_identical(TMP_PREVIOUS, TMP_CURRENT):
+                stable_count += 1
+                print(f"   UI stable ({stable_count}/{REQUIRED_STABLE})")
+
+                if stable_count >= REQUIRED_STABLE:
+                    print("✅ UI has settled")
+                    return True
+            else:
+                stable_count = 0
+                print(f"   UI still changing... (attempt {i}/{MAX_ATTEMPTS})")
+        else:
+            print("   Taking initial snapshot...")
+
+        # Copy current to previous for next iteration
+        shutil.copy(TMP_CURRENT, TMP_PREVIOUS)
+        time.sleep(1)
+
+    print("⚠️  Warning: UI may not be fully settled, proceeding anyway...")
+    return False
+
+
+def get_button_center(bounds: str) -> Optional[Tuple[int, int]]:
+    """Extract center coordinates from bounds string like '[x1,y1][x2,y2]'."""
+    match = re.match(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]', bounds)
+    if match:
+        x1, y1, x2, y2 = map(int, match.groups())
+        center_x = (x1 + x2) // 2
+        center_y = (y1 + y2) // 2
+        return (center_x, center_y)
+    return None
+
+
+def find_unlock_button() -> Optional[Tuple[int, int]]:
+    """
+    Analyze the UI dump to find the unlock button.
+    Returns coordinates as (x, y) tuple or None if not found.
+    """
+    try:
+        tree = ET.parse(TMP_CURRENT)
+        root = tree.getroot()
+
+        # Look for the main unlock button (large circular button in center)
+        # It's a FrameLayout that's clickable and in the middle of the screen
+        for elem in root.iter():
+            clickable = elem.get('clickable', 'false')
+            bounds = elem.get('bounds', '')
+
+            if clickable == 'true' and bounds:
+                match = re.match(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]', bounds)
+                if match:
+                    x1, y1, x2, y2 = map(int, match.groups())
+                    width = x2 - x1
+                    height = y2 - y1
+
+                    # Look for large square-ish button in the middle area
+                    # The unlock button is typically 300-500px wide and centered
+                    if width > 300 and height > 300 and x1 < 300 and x2 > 400:
+                        coords = get_button_center(bounds)
+                        if coords:
+                            return coords
+
+        return None
+    except Exception as e:
+        print(f"   ⚠️  Error parsing UI: {e}")
+        return None
+
+
+def tap_unlock_button(x: int, y: int):
+    """Tap at the given coordinates."""
+    print(f"🔓 Tapping unlock button at ({x}, {y})...")
+    run_adb_command(["shell", "input", "tap", str(x), str(y)])
+    print("✅ Unlock command sent!")
+
+
+def cleanup():
+    """Clean up temporary files."""
+    for tmp_file in [TMP_CURRENT, TMP_PREVIOUS]:
+        Path(tmp_file).unlink(missing_ok=True)
+
+    run_adb_command(
+        ["shell", "rm", "-f", UI_DUMP_PATH],
+        check=False,
+        capture_output=True
+    )
+
+
+def save_final_ui_dump():
+    """Save the final UI dump for inspection."""
+    try:
+        UI_FINAL_PATH.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(TMP_CURRENT, UI_FINAL_PATH)
+        print(f"💾 Saved final UI state to {UI_FINAL_PATH}")
+    except Exception as e:
+        print(f"   ⚠️  Could not save final UI dump: {e}")
+
+
+def main():
+    """Main execution flow."""
+    print("🔓 Qrio Smart Lock Unlock Script (with UI settling)")
+    print("=" * 52)
+
+    # Check if device is connected
+    print("📱 Checking for connected devices...")
+    if not check_device_connected():
+        print("❌ Error: No device connected.")
+        sys.exit(1)
+
+    print("✅ Device connected")
+
+    try:
+        # Wake up device and unlock screen
+        wake_device()
+
+        # Launch Qrio app
+        launch_qrio_app()
+
+        # Wait for UI to settle
+        wait_for_ui_to_settle()
+
+        # Save final UI dump
+        save_final_ui_dump()
+
+        # Analyze UI to find unlock button
+        print("🔍 Analyzing UI for unlock button...")
+        coords = find_unlock_button()
+
+        if coords:
+            x, y = coords
+            print(f"✅ Found unlock button at: {x} {y}")
+            tap_unlock_button(x, y)
+        else:
+            # Fallback to default coordinates
+            print("⚠️  Using default coordinates (360, 684)")
+            tap_unlock_button(360, 684)
+
+        print()
+        print("🎉 Done!")
+        print()
+        print(f"💡 Tip: Check {UI_FINAL_PATH} to see the final UI state")
+
+    finally:
+        # Always cleanup temporary files
+        cleanup()
+
+
+if __name__ == "__main__":
+    main()
