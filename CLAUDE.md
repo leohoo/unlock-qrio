@@ -41,9 +41,15 @@ Event-driven daemon for RFID-triggered unlock:
 
 1. **Card Authorization** (`AuthorizedCards`): Manages whitelist of authorized NFC card IDs in JSON config
 2. **NFC Reader Interface**: Uses `nfcpy` library to communicate with Sony RC-S380 via USB
-3. **Event Loop**: Continuously monitors for NFC card presence
-4. **Cooldown Mechanism**: Prevents rapid repeated unlocks (5 seconds default)
-5. **Card Management**: CLI commands for adding/removing/listing authorized cards
+3. **Multi-Protocol Support**: Polls for both NFC (Type4Tag) and FeliCa (Type3Tag) simultaneously
+   - `'212F', '424F'` = FeliCa at 212/424 kbps (for Mobile Suica, etc.)
+   - `'106A', '106B'` = ISO-DEP at 106 kbps (for physical NFC cards)
+4. **Smart ID Selection** (`card_id_to_string`): Automatically prefers stable FeliCa IDm over random UID
+   - If `tag.idm` exists → use IDm (FeliCa stable identifier)
+   - Otherwise → use `tag.identifier` (standard NFC UID)
+5. **Event Loop**: Continuously monitors for NFC card/phone presence
+6. **Cooldown Mechanism**: Prevents rapid repeated unlocks (5 seconds default)
+7. **Card Management**: CLI commands for adding/removing/listing authorized cards
 
 **Design Decisions**:
 - Imports `unlock_qrio_lock()` function from core module (no code duplication)
@@ -51,6 +57,7 @@ Event-driven daemon for RFID-triggered unlock:
 - JSON config stored in `~/.config/qrio/authorized_cards.json`
 - Card IDs stored as uppercase hex strings for consistency
 - Scan mode (`--scan`) for discovering card IDs without triggering unlock
+- Supports Android phones with Mobile Suica/FeliCa apps (stable IDm)
 
 ## Prerequisites
 
@@ -137,7 +144,15 @@ Timing constants in `rfid_trigger.py`:
 ### Modifying RFID Trigger (`rfid_trigger.py`)
 
 - **Card Storage**: `AuthorizedCards` class manages JSON config at `~/.config/qrio/authorized_cards.json`
-- **Card ID Format**: Always converted to uppercase hex via `card_id_to_string(tag)`
+- **Card ID Format**: Always converted to uppercase hex via `card_id_to_string(tag)` at line ~90
+  - Prefers FeliCa IDm (`tag.idm`) when available (stable for Mobile Suica)
+  - Falls back to standard UID (`tag.identifier`) for regular NFC cards
+- **Multi-Protocol Polling**: Lines ~151 and ~222 poll for multiple NFC types:
+  ```python
+  'targets': ['212F', '424F', '106A', '106B']
+  ```
+  - `212F/424F` = FeliCa (Type3Tag) at 212/424 kbps
+  - `106A/106B` = ISO-DEP (Type4Tag) at 106 kbps
 - **Cooldown**: `COOLDOWN_SECONDS = 5` prevents rapid repeated unlocks
 - **NFC Library**: Uses `nfcpy.ContactlessFrontend('usb')` to connect to RC-S380
 - **Event Loop**: `run_daemon()` continuously polls for cards with 0.1s sleep to prevent CPU spinning
@@ -173,3 +188,9 @@ unlock_qrio_lock(verbose=True)
    - Added `signal.SIGINT` handlers in both `run_daemon()` and `scan_mode()`
    - Used `terminate` callback in `clf.connect()` to check stop flag
    - Allows graceful shutdown even during blocking NFC reads
+
+3. **FeliCa/Mobile Suica Support**:
+   - Added multi-protocol polling for both NFC and FeliCa
+   - Implemented smart ID selection that prefers stable FeliCa IDm
+   - Enables Android phones with Mobile Suica to work as unlock credentials
+   - Physical NFC cards and FeliCa cards both supported simultaneously

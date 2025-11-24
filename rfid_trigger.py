@@ -89,7 +89,11 @@ class AuthorizedCards:
 
 def card_id_to_string(tag) -> str:
     """Convert NFC tag to a readable string ID."""
-    # Use the tag identifier as the card ID
+    # For FeliCa cards (like Suica), use IDm instead of identifier
+    # IDm is stable for FeliCa cards, while identifier may change
+    if hasattr(tag, 'idm') and tag.idm:
+        return tag.idm.hex().upper()
+    # For other tags, use the tag identifier
     return tag.identifier.hex().upper()
 
 
@@ -141,8 +145,12 @@ def run_daemon(auth_cards: AuthorizedCards):
 
     try:
         while not stop_flag['stop']:
-            # Use terminate callback to check for stop signal
-            tag = clf.connect(rdwr={'on-connect': lambda tag: False}, terminate=lambda: stop_flag['stop'])
+            # Poll for all NFC types simultaneously
+            # The card_id_to_string() function will prefer FeliCa IDm when available
+            tag = clf.connect(rdwr={
+                'targets': ['212F', '424F', '106A', '106B'],
+                'on-connect': lambda tag: False
+            }, terminate=lambda: stop_flag['stop'])
 
             if tag:
                 card_id = card_id_to_string(tag)
@@ -204,20 +212,50 @@ def scan_mode():
         sys.exit(1)
 
     try:
+        print("Waiting for NFC cards...\n")
+        last_card_id = None
+
         while not stop_flag['stop']:
-            # Use terminate callback to check for stop signal
-            tag = clf.connect(rdwr={'on-connect': lambda tag: False}, terminate=lambda: stop_flag['stop'])
+            # Poll for all NFC types simultaneously
+            # The card_id_to_string() function will prefer FeliCa IDm when available
+            tag = clf.connect(rdwr={
+                'targets': ['212F', '424F', '106A', '106B'],
+                'on-connect': lambda tag: False
+            }, terminate=lambda: stop_flag['stop'])
 
             if tag:
                 card_id = card_id_to_string(tag)
-                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                print(f"[{timestamp}] Card detected: {card_id}")
-                print(f"   Type: {tag.type}")
-                print(f"   To authorize: ./rfid_trigger.py --add-card {card_id}\n")
 
-                # Wait for card to be removed
-                while not stop_flag['stop'] and clf.connect(rdwr={'on-connect': lambda tag: False}, terminate=lambda: stop_flag['stop']):
-                    time.sleep(0.1)
+                # Only print if it's a different card (prevents spam from same card)
+                if card_id != last_card_id:
+                    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    print(f"[{timestamp}] Card detected: {card_id}")
+                    print(f"   Type: {tag.type}")
+
+                    # Debug: Show all available tag attributes
+                    print(f"   Identifier (UID): {tag.identifier.hex().upper()}")
+
+                    # FeliCa specific data (for Suica, etc.)
+                    if hasattr(tag, 'idm') and tag.idm:
+                        print(f"   IDm (FeliCa stable ID): {tag.idm.hex().upper()}")
+                        print(f"   → Using IDm as card ID (stable)")
+                    else:
+                        print(f"   → Using UID as card ID (may be random)")
+
+                    if hasattr(tag, 'pmm') and tag.pmm:
+                        print(f"   PMM: {tag.pmm.hex().upper()}")
+                    if hasattr(tag, 'sys') and tag.sys:
+                        print(f"   System Code: {tag.sys}")
+
+                    # NDEF data
+                    if hasattr(tag, 'ndef'):
+                        print(f"   NDEF: {tag.ndef}")
+
+                    print(f"   To authorize: ./rfid_trigger.py --add-card {card_id}\n")
+                    last_card_id = card_id
+            else:
+                # No card detected, clear the last card
+                last_card_id = None
 
             time.sleep(0.1)
 

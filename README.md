@@ -6,9 +6,11 @@ Automate unlocking of Qrio Smart Lock via Android Debug Bridge (ADB), with optio
 
 - **Automated Unlock**: Unlock Qrio Smart Lock via ADB with UI settling detection
 - **RFID Trigger**: Trigger unlock by scanning authorized NFC cards (Sony RC-S380)
+- **Multi-Protocol Support**: Works with both NFC (Type4Tag) and FeliCa (Type3Tag) cards
+- **Mobile Suica Support**: Use your Android phone with Mobile Suica as a stable unlock credential
 - **Smart Detection**: Waits for app UI to stabilize before attempting unlock
 - **Dynamic Button Finding**: Automatically locates unlock button in UI hierarchy
-- **Card Authorization**: Manage whitelist of authorized NFC cards
+- **Card Authorization**: Manage whitelist of authorized NFC cards and phone IDs
 
 ## Prerequisites
 
@@ -120,9 +122,12 @@ sudo systemctl start qrio-rfid
 ### RFID Trigger
 
 1. Connects to Sony RC-S380 NFC reader via USB
-2. Continuously monitors for NFC cards
-3. When a card is detected:
-   - Checks if card ID is in authorized list
+2. Continuously monitors for both NFC and FeliCa cards
+3. When a card/phone is detected:
+   - Polls for FeliCa (Type3Tag) and NFC (Type4Tag) simultaneously
+   - For FeliCa cards (e.g., Mobile Suica): uses stable IDm as identifier
+   - For regular NFC cards: uses UID as identifier
+   - Checks if card/phone ID is in authorized list
    - Applies cooldown to prevent rapid repeated unlocks (5 seconds default)
    - Calls `unlock_qrio_lock()` function
    - Logs the event with timestamp
@@ -141,6 +146,16 @@ sudo systemctl start qrio-rfid
 - Check USB permissions (may need root or udev rules on Linux)
 - Verify device is detected: `lsusb | grep Sony` (should show `054c:06c3`)
 - **Ctrl+C not working?** The script uses signal handling to allow graceful shutdown. Press Ctrl+C and wait up to 1 second for the current NFC read operation to complete.
+
+### Mobile Phone NFC Issues
+
+- **Android phones generate random UIDs** for privacy - this is normal
+- **Solution for Android**: Use Mobile Suica, Mobile Pasmo, or similar FeliCa apps
+  - These apps provide a stable FeliCa IDm that doesn't change
+  - Open the app before scanning
+  - The script automatically detects and uses the stable IDm
+- **Physical NFC cards** always have stable UIDs - recommended for simplicity
+- **iPhone NFC** is not supported (Apple restricts background NFC access)
 
 ### UI Detection Issues
 
