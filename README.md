@@ -332,6 +332,95 @@ EOF'
 # Then follow steps 2-5 above
 ```
 
+### Raspberry Pi: USB Device Becomes Unresponsive After Hours
+
+If the NFC reader becomes "dead" after several hours on Raspberry Pi, this is usually caused by USB power management. The improved daemon now includes automatic error recovery, but you should also disable USB autosuspend.
+
+**Symptoms:**
+- NFC reader works initially but stops responding after a few hours
+- Syslog shows USB I/O errors or "No such device" errors
+- Daemon stops detecting cards even though LED is on
+
+**Solution 1: Disable USB Autosuspend Globally (Recommended for Raspberry Pi)**
+
+```bash
+# Disable USB autosuspend for all USB devices
+echo 'SUBSYSTEM=="usb", TEST=="power/control", ATTR{power/control}="on"' | \
+  sudo tee /etc/udev/rules.d/50-usb-power.rules
+
+# Reload udev rules
+sudo udevadm control --reload-rules
+sudo udevadm trigger
+
+# Reboot for changes to take effect
+sudo reboot
+```
+
+**Solution 2: Disable Autosuspend for Specific Device Only**
+
+```bash
+# Add to existing NFC reader udev rule
+sudo bash -c 'cat > /etc/udev/rules.d/99-nfc-rc-s380.rules << EOF
+# Sony RC-S380 NFC Reader - disable autosuspend
+SUBSYSTEM=="usb", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="06c3", MODE="0666", GROUP="plugdev", ATTR{power/control}="on"
+EOF'
+
+# Reload and reboot
+sudo udevadm control --reload-rules
+sudo udevadm trigger
+sudo reboot
+```
+
+**Solution 3: Kernel Boot Parameters (Most Reliable)**
+
+Add to `/boot/cmdline.txt` (Raspberry Pi OS):
+```bash
+# Edit the file
+sudo nano /boot/cmdline.txt
+
+# Add to the end of the SINGLE line (space-separated):
+usbcore.autosuspend=-1
+
+# Save and reboot
+sudo reboot
+```
+
+**Verify USB Autosuspend is Disabled:**
+
+```bash
+# Check current autosuspend setting for the NFC reader
+# Find the device path first
+lsusb | grep Sony  # Note the bus and device numbers (e.g., Bus 001 Device 005)
+
+# Check autosuspend setting (replace 1-1 with your device path)
+cat /sys/bus/usb/devices/1-1/power/control
+# Should show "on" (autosuspend disabled) instead of "auto"
+
+# Check autosuspend delay
+cat /sys/bus/usb/devices/1-1/power/autosuspend_delay_ms
+# If set to -1, autosuspend is disabled
+```
+
+**Daemon Auto-Recovery Features:**
+
+The latest daemon version includes automatic USB error recovery:
+- Detects USB I/O errors and attempts reconnection
+- Performs health checks every 5 minutes if no cards detected
+- Logs all USB errors to syslog for debugging
+- Automatically reconnects after consecutive errors
+
+To monitor the daemon's health:
+```bash
+# Watch daemon logs in real-time
+sudo journalctl -u qrio-rfid -f
+
+# Check for USB errors in syslog
+sudo grep "USB I/O error" /var/log/syslog
+
+# Check for reconnection attempts
+sudo grep "Reconnecting to NFC reader" /var/log/syslog
+```
+
 ## Configuration Options
 
 ### Timing Configuration (`unlock_qrio.py`)

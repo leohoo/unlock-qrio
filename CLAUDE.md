@@ -153,7 +153,7 @@ Timing constants in `rfid_trigger.py`:
 - **Card ID Format**: Always converted to uppercase hex via `card_id_to_string(tag)` at line ~90
   - Prefers FeliCa IDm (`tag.idm`) when available (stable for Mobile Suica)
   - Falls back to standard UID (`tag.identifier`) for regular NFC cards
-- **Multi-Protocol Polling**: Lines ~151 and ~222 poll for multiple NFC types:
+- **Multi-Protocol Polling**: Lines ~205 and ~238 poll for multiple NFC types:
   ```python
   'targets': ['212F', '424F', '106A', '106B']
   ```
@@ -161,11 +161,25 @@ Timing constants in `rfid_trigger.py`:
   - `106A/106B` = ISO-DEP (Type4Tag) at 106 kbps
 - **Cooldown**: `COOLDOWN_SECONDS = 5` prevents rapid repeated unlocks
 - **NFC Library**: Uses `nfcpy.ContactlessFrontend('usb')` to connect to RC-S380
+- **Connection Management**: `connect_to_reader()` function at line ~117 handles USB connection with retry logic
+  - Retries 3 times with 5s delay between attempts
+  - Logs connection failures to syslog
+  - Returns None if unable to connect after max retries
 - **Event Loop**: `run_daemon()` continuously polls for cards with 0.1s sleep to prevent CPU spinning
+- **Error Recovery**: Lines ~250-298 handle USB errors with automatic reconnection
+  - Catches `IOError` for USB communication failures
+  - Catches generic exceptions for unexpected errors
+  - Reconnects after `MAX_CONSECUTIVE_ERRORS` (5) consecutive failures
+  - Resets error counter and `last_successful_read` on successful reconnection
+- **Health Monitoring**: Lines ~189-201 perform periodic health checks
+  - Checks if more than `HEALTH_CHECK_INTERVAL` (300s/5min) elapsed since last successful read
+  - Proactively closes and reconnects to test USB connection
+  - Prevents device from staying in "zombie" state
 - **Signal Handling**: Uses `signal.SIGINT` handler + `stop_flag` to allow graceful Ctrl+C shutdown
   - The `terminate` callback in `clf.connect()` checks `stop_flag['stop']` to break out of blocking NFC reads
   - This allows Ctrl+C to work even when waiting for NFC cards
 - **USB Permissions**: On Linux, may require udev rules for non-root access (see README.md)
+- **Raspberry Pi Compatibility**: See README.md for USB autosuspend prevention (prevents device becoming "dead" after hours)
 
 ### Testing Without Hardware
 
@@ -200,3 +214,14 @@ unlock_qrio_lock(verbose=True)
    - Implemented smart ID selection that prefers stable FeliCa IDm
    - Enables Android phones with Mobile Suica to work as unlock credentials
    - Physical NFC cards and FeliCa cards both supported simultaneously
+
+4. **USB Error Recovery & Stability** (Raspberry Pi compatibility):
+   - Added `connect_to_reader()` function with retry logic (3 attempts, 5s delay)
+   - Automatic reconnection on USB I/O errors (after 5 consecutive errors)
+   - Health check every 5 minutes of inactivity (proactively tests USB connection)
+   - Tracks `last_successful_read` and `consecutive_errors` for monitoring
+   - Wraps `clf.connect()` in try/except for IOError and generic exceptions
+   - Logs all USB errors to syslog for debugging
+   - Graceful cleanup with try/except around `clf.close()` in finally block
+   - Fixes Raspberry Pi USB autosuspend issue (device becoming "dead" after hours)
+   - Constants: `MAX_CONSECUTIVE_ERRORS = 5`, `HEALTH_CHECK_INTERVAL = 300` (5 minutes)

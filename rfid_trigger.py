@@ -114,10 +114,47 @@ def scan_card(clf) -> Optional[str]:
     return None
 
 
+def connect_to_reader(max_retries: int = 3, retry_delay: int = 5):
+    """
+    Connect to the NFC reader with retry logic.
+
+    Args:
+        max_retries: Maximum number of connection attempts
+        retry_delay: Delay in seconds between retries
+
+    Returns:
+        Connected ContactlessFrontend instance or None on failure
+    """
+    for attempt in range(max_retries):
+        try:
+            clf = nfc.ContactlessFrontend('usb')
+            print(f"✅ Connected to NFC reader: {clf.device}")
+            syslog.syslog(syslog.LOG_INFO, f"Connected to NFC reader: {clf.device}")
+            return clf
+        except Exception as e:
+            if attempt < max_retries - 1:
+                print(f"⚠️  Connection attempt {attempt + 1} failed: {e}")
+                print(f"   Retrying in {retry_delay}s...")
+                syslog.syslog(syslog.LOG_WARNING, f"NFC reader connection failed (attempt {attempt + 1}): {e}")
+                time.sleep(retry_delay)
+            else:
+                error_msg = f"Could not connect to NFC reader after {max_retries} attempts: {e}"
+                print(f"❌ Error: {error_msg}")
+                print("\nTroubleshooting:")
+                print("  1. Make sure the Sony RC-S380 is connected via USB")
+                print("  2. Check USB permissions (you may need to run as root or add udev rules)")
+                print("  3. Run 'python3 -m nfc' to test the connection")
+                print("  4. On Raspberry Pi, disable USB autosuspend (see README.md)")
+                syslog.syslog(syslog.LOG_ERR, error_msg)
+                return None
+    return None
+
+
 def run_daemon(auth_cards: AuthorizedCards):
     """
     Run the RFID trigger daemon.
     Continuously monitors for NFC cards and triggers unlock for authorized ones.
+    Includes automatic USB error recovery and reconnection.
     """
     # Initialize syslog
     syslog.openlog('qrio-rfid', syslog.LOG_PID, syslog.LOG_DAEMON)
@@ -129,7 +166,16 @@ def run_daemon(auth_cards: AuthorizedCards):
     print("Press Ctrl+C to stop\n")
 
     last_unlock_time = 0
+    last_successful_read = time.time()
+    last_health_check = time.time()
     stop_flag = {'stop': False}
+    consecutive_errors = 0
+    MAX_CONSECUTIVE_ERRORS = 5
+    HEALTH_CHECK_INTERVAL = 30  # More aggressive: 30 seconds
+    FORCED_RECONNECT_INTERVAL = 3600  # Force reconnect every hour as preventive measure
+    poll_count = 0
+    card_detected_count = 0
+    last_forced_reconnect = time.time()
 
     def signal_handler(sig, frame):
         """Handle Ctrl+C gracefully."""
@@ -137,64 +183,153 @@ def run_daemon(auth_cards: AuthorizedCards):
 
     signal.signal(signal.SIGINT, signal_handler)
 
-    try:
-        clf = nfc.ContactlessFrontend('usb')
-        print(f"✅ Connected to NFC reader: {clf.device}\n")
-        syslog.syslog(syslog.LOG_INFO, f"Connected to NFC reader: {clf.device}")
-    except Exception as e:
-        error_msg = f"Could not connect to NFC reader: {e}"
-        print(f"❌ Error: {error_msg}")
-        print("\nTroubleshooting:")
-        print("  1. Make sure the Sony RC-S380 is connected via USB")
-        print("  2. Check USB permissions (you may need to run as root or add udev rules)")
-        print("  3. Run 'python3 -m nfc' to test the connection")
-        syslog.syslog(syslog.LOG_ERR, error_msg)
+    # Initial connection
+    clf = connect_to_reader()
+    if not clf:
         sys.exit(1)
 
     try:
         while not stop_flag['stop']:
-            # Poll for all NFC types simultaneously
-            # The card_id_to_string() function will prefer FeliCa IDm when available
-            tag = clf.connect(rdwr={
-                'targets': ['212F', '424F', '106A', '106B'],
-                'on-connect': lambda tag: False
-            }, terminate=lambda: stop_flag['stop'])
+            try:
+                poll_count += 1
 
-            if tag:
-                card_id = card_id_to_string(tag)
-                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                # Periodic health check (every 30 seconds)
+                if time.time() - last_health_check > HEALTH_CHECK_INTERVAL:
+                    elapsed = int(time.time() - last_health_check)
+                    uptime = int(time.time() - last_forced_reconnect)
+                    print(f"🔍 Health: {poll_count} polls, {card_detected_count} cards, uptime {uptime}s")
+                    syslog.syslog(syslog.LOG_INFO,
+                        f"Health: polls={poll_count}, cards={card_detected_count}, errors={consecutive_errors}, uptime={uptime}s")
+                    last_health_check = time.time()
 
-                if auth_cards.is_authorized(card_id):
-                    # Check cooldown
-                    current_time = time.time()
-                    if current_time - last_unlock_time >= COOLDOWN_SECONDS:
-                        print(f"[{timestamp}] ✅ Authorized card: {card_id}")
-                        print("🔓 Triggering unlock...")
-                        syslog.syslog(syslog.LOG_INFO, f"Authorized card detected: {card_id}")
+                # Preventive forced reconnect every hour (workaround for device firmware hangs)
+                if time.time() - last_forced_reconnect > FORCED_RECONNECT_INTERVAL:
+                    uptime = int(time.time() - last_forced_reconnect)
+                    print(f"🔄 Preventive reconnect after {uptime}s uptime ({poll_count} polls, {card_detected_count} cards)")
+                    syslog.syslog(syslog.LOG_INFO,
+                        f"Preventive reconnect: uptime={uptime}s, polls={poll_count}, cards={card_detected_count}")
 
-                        try:
-                            success = unlock_qrio_lock(verbose=False)
-                            if success:
-                                print("✅ Unlock successful!\n")
-                                syslog.syslog(syslog.LOG_INFO, f"Unlock successful for card: {card_id}")
-                                last_unlock_time = current_time
-                            else:
-                                print("❌ Unlock failed!\n")
-                                syslog.syslog(syslog.LOG_WARNING, f"Unlock failed for card: {card_id}")
-                        except Exception as e:
-                            error_msg = f"Error during unlock for card {card_id}: {e}"
-                            print(f"❌ Error during unlock: {e}\n")
-                            syslog.syslog(syslog.LOG_ERR, error_msg)
+                    try:
+                        clf.close()
+                    except:
+                        pass
+
+                    clf = connect_to_reader()
+                    if not clf:
+                        print("❌ Preventive reconnect failed, exiting")
+                        break
+
+                    last_forced_reconnect = time.time()
+                    poll_count = 0
+                    card_detected_count = 0
+                    print("✅ Preventive reconnect successful\n")
+
+                # Poll for all NFC types simultaneously
+                # The card_id_to_string() function will prefer FeliCa IDm when available
+                tag = clf.connect(rdwr={
+                    'targets': ['212F', '424F', '106A', '106B'],
+                    'on-connect': lambda tag: False
+                }, terminate=lambda: stop_flag['stop'])
+
+                # Successful poll - reset error counter
+                consecutive_errors = 0
+                last_successful_read = time.time()
+
+                if tag:
+                    card_detected_count += 1
+                    card_id = card_id_to_string(tag)
+                    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+                    if auth_cards.is_authorized(card_id):
+                        # Check cooldown
+                        current_time = time.time()
+                        if current_time - last_unlock_time >= COOLDOWN_SECONDS:
+                            print(f"[{timestamp}] ✅ Authorized card: {card_id}")
+                            print("🔓 Triggering unlock...")
+                            syslog.syslog(syslog.LOG_INFO, f"Authorized card detected: {card_id}")
+
+                            try:
+                                success = unlock_qrio_lock(verbose=False)
+                                if success:
+                                    print("✅ Unlock successful!\n")
+                                    syslog.syslog(syslog.LOG_INFO, f"Unlock successful for card: {card_id}")
+                                    last_unlock_time = current_time
+                                else:
+                                    print("❌ Unlock failed!\n")
+                                    syslog.syslog(syslog.LOG_WARNING, f"Unlock failed for card: {card_id}")
+                            except Exception as e:
+                                error_msg = f"Error during unlock for card {card_id}: {e}"
+                                print(f"❌ Error during unlock: {e}\n")
+                                syslog.syslog(syslog.LOG_ERR, error_msg)
+                        else:
+                            remaining = int(COOLDOWN_SECONDS - (current_time - last_unlock_time))
+                            print(f"[{timestamp}] ⏳ Card detected but in cooldown ({remaining}s remaining)")
+                            syslog.syslog(syslog.LOG_INFO, f"Authorized card in cooldown: {card_id} ({remaining}s remaining)")
                     else:
-                        remaining = int(COOLDOWN_SECONDS - (current_time - last_unlock_time))
-                        print(f"[{timestamp}] ⏳ Card detected but in cooldown ({remaining}s remaining)")
-                        syslog.syslog(syslog.LOG_INFO, f"Authorized card in cooldown: {card_id} ({remaining}s remaining)")
-                else:
-                    print(f"[{timestamp}] ⚠️  Unauthorized card: {card_id}")
-                    print(f"   Use '--add-card {card_id}' to authorize\n")
-                    syslog.syslog(syslog.LOG_WARNING, f"Unauthorized card detected: {card_id}")
+                        print(f"[{timestamp}] ⚠️  Unauthorized card: {card_id}")
+                        print(f"   Use '--add-card {card_id}' to authorize\n")
+                        syslog.syslog(syslog.LOG_WARNING, f"Unauthorized card detected: {card_id}")
 
-            time.sleep(0.1)  # Small delay to prevent CPU spinning
+                time.sleep(0.1)  # Small delay to prevent CPU spinning
+
+            except IOError as e:
+                # USB communication error - attempt reconnection
+                consecutive_errors += 1
+                error_msg = f"USB I/O error (#{consecutive_errors}): {e}"
+                print(f"⚠️  {error_msg}")
+                syslog.syslog(syslog.LOG_WARNING, error_msg)
+
+                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                    print(f"❌ Too many consecutive errors ({consecutive_errors}), attempting reconnection...")
+                    syslog.syslog(syslog.LOG_ERR,
+                        f"Too many consecutive USB errors, attempting reconnection (polls={poll_count}, cards={card_detected_count})")
+
+                    try:
+                        clf.close()
+                    except:
+                        pass
+
+                    print("🔄 Reconnecting to NFC reader...")
+                    clf = connect_to_reader()
+                    if not clf:
+                        print("❌ Failed to reconnect, exiting")
+                        break
+
+                    consecutive_errors = 0
+                    last_successful_read = time.time()
+                    last_forced_reconnect = time.time()
+                    poll_count = 0
+                    card_detected_count = 0
+                    print("✅ Reconnection successful\n")
+                else:
+                    time.sleep(1)  # Brief delay before retry
+
+            except Exception as e:
+                # Unexpected error
+                consecutive_errors += 1
+                error_msg = f"Unexpected error in daemon loop (#{consecutive_errors}): {e}"
+                print(f"❌ {error_msg}")
+                syslog.syslog(syslog.LOG_ERR, error_msg)
+
+                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                    print(f"❌ Too many consecutive errors, attempting reconnection...")
+                    syslog.syslog(syslog.LOG_ERR,
+                        f"Too many consecutive unexpected errors (polls={poll_count}, cards={card_detected_count})")
+                    try:
+                        clf.close()
+                    except:
+                        pass
+
+                    clf = connect_to_reader()
+                    if not clf:
+                        break
+                    consecutive_errors = 0
+                    last_successful_read = time.time()
+                    last_forced_reconnect = time.time()
+                    poll_count = 0
+                    card_detected_count = 0
+                else:
+                    time.sleep(1)
 
     except KeyboardInterrupt:
         pass
@@ -202,7 +337,10 @@ def run_daemon(auth_cards: AuthorizedCards):
         if stop_flag['stop']:
             print("\n\n👋 Daemon stopped")
             syslog.syslog(syslog.LOG_INFO, "Qrio RFID Trigger Daemon stopped")
-        clf.close()
+        try:
+            clf.close()
+        except:
+            pass
         syslog.closelog()
 
 
