@@ -171,8 +171,8 @@ def run_daemon(auth_cards: AuthorizedCards):
     stop_flag = {'stop': False}
     consecutive_errors = 0
     MAX_CONSECUTIVE_ERRORS = 5
-    HEALTH_CHECK_INTERVAL = 30  # More aggressive: 30 seconds
-    FORCED_RECONNECT_INTERVAL = 3600  # Force reconnect every hour as preventive measure
+    HEALTH_CHECK_INTERVAL = 30  # Health check every 30 seconds
+    FORCED_RECONNECT_INTERVAL = 3600  # Force reconnect every 1 hour (preventive measure)
     poll_count = 0
     card_detected_count = 0
     last_forced_reconnect = time.time()
@@ -197,39 +197,49 @@ def run_daemon(auth_cards: AuthorizedCards):
                 if time.time() - last_health_check > HEALTH_CHECK_INTERVAL:
                     elapsed = int(time.time() - last_health_check)
                     uptime = int(time.time() - last_forced_reconnect)
-                    print(f"🔍 Health: {poll_count} polls, {card_detected_count} cards, uptime {uptime}s")
+
+                    # Calculate poll rate to detect zombie state
+                    expected_polls = int(uptime * 10)  # Should be ~10 polls/second
+                    poll_rate_percentage = (poll_count / expected_polls * 100) if expected_polls > 0 else 100
+
+                    print(f"🔍 Health: {poll_count} polls, {card_detected_count} cards, uptime {uptime}s ({poll_rate_percentage:.1f}%)")
                     syslog.syslog(syslog.LOG_INFO,
-                        f"Health: polls={poll_count}, cards={card_detected_count}, errors={consecutive_errors}, uptime={uptime}s")
+                        f"Health: polls={poll_count}, cards={card_detected_count}, errors={consecutive_errors}, uptime={uptime}s, rate={poll_rate_percentage:.1f}%")
+
+                    # Detect zombie state: if poll rate is abnormally low, force reconnect
+                    if uptime > 60 and poll_rate_percentage < 50:  # Less than 50% of expected rate after 1 minute
+                        print(f"⚠️  ZOMBIE STATE DETECTED: Only {poll_rate_percentage:.1f}% of expected polls!")
+                        syslog.syslog(syslog.LOG_WARNING,
+                            f"Zombie state detected: poll_rate={poll_rate_percentage:.1f}%, forcing reconnect")
+                        raise IOError("Zombie state detected - abnormally low poll rate")
+
                     last_health_check = time.time()
 
-                # Preventive forced reconnect every hour (workaround for device firmware hangs)
+                # Check if we need to force reconnect BEFORE polling
+                # This ensures the timer is checked even if clf.connect() blocks
                 if time.time() - last_forced_reconnect > FORCED_RECONNECT_INTERVAL:
                     uptime = int(time.time() - last_forced_reconnect)
                     print(f"🔄 Preventive reconnect after {uptime}s uptime ({poll_count} polls, {card_detected_count} cards)")
                     syslog.syslog(syslog.LOG_INFO,
                         f"Preventive reconnect: uptime={uptime}s, polls={poll_count}, cards={card_detected_count}")
+                    raise IOError("Preventive reconnect timer")
 
-                    try:
-                        clf.close()
-                    except:
-                        pass
+                # Poll for all NFC types simultaneously with timeout via terminate callback
+                # The terminate callback lets us break out of blocking clf.connect() calls
+                poll_start_time = time.time()
+                POLL_TIMEOUT = 5.0  # Force timeout after 5 seconds if clf.connect() hangs
 
-                    clf = connect_to_reader()
-                    if not clf:
-                        print("❌ Preventive reconnect failed, exiting")
-                        break
+                def should_terminate():
+                    if stop_flag['stop']:
+                        return True
+                    if time.time() - poll_start_time > POLL_TIMEOUT:
+                        return True  # Timeout - force clf.connect() to return
+                    return False
 
-                    last_forced_reconnect = time.time()
-                    poll_count = 0
-                    card_detected_count = 0
-                    print("✅ Preventive reconnect successful\n")
-
-                # Poll for all NFC types simultaneously
-                # The card_id_to_string() function will prefer FeliCa IDm when available
                 tag = clf.connect(rdwr={
                     'targets': ['212F', '424F', '106A', '106B'],
                     'on-connect': lambda tag: False
-                }, terminate=lambda: stop_flag['stop'])
+                }, terminate=should_terminate)
 
                 # Successful poll - reset error counter
                 consecutive_errors = 0
