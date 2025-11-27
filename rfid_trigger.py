@@ -237,7 +237,7 @@ def run_daemon(auth_cards: AuthorizedCards):
                     return False
 
                 tag = clf.connect(rdwr={
-                    'targets': ['212F', '424F', '106A', '106B'],
+                    'targets': ['212F', '424F'],  # FeliCa only for better performance
                     'on-connect': lambda tag: False
                 }, terminate=should_terminate)
 
@@ -381,10 +381,10 @@ def scan_mode():
         last_card_id = None
 
         while not stop_flag['stop']:
-            # Poll for all NFC types simultaneously
+            # Poll for FeliCa cards only (optimized for Raspberry Pi performance)
             # The card_id_to_string() function will prefer FeliCa IDm when available
             tag = clf.connect(rdwr={
-                'targets': ['212F', '424F', '106A', '106B'],
+                'targets': ['212F', '424F'],  # FeliCa only for better performance
                 'on-connect': lambda tag: False
             }, terminate=lambda: stop_flag['stop'])
 
