@@ -114,10 +114,28 @@ def scan_card(clf) -> Optional[str]:
     return None
 
 
+def connect_to_reader():
+    """
+    Connect to the NFC reader.
+    Returns ContactlessFrontend instance or None on failure.
+    """
+    try:
+        clf = nfc.ContactlessFrontend('usb')
+        print(f"✅ Connected to NFC reader: {clf.device}")
+        syslog.syslog(syslog.LOG_INFO, f"Connected to NFC reader: {clf.device}")
+        return clf
+    except Exception as e:
+        error_msg = f"Could not connect to NFC reader: {e}"
+        print(f"❌ Error: {error_msg}")
+        syslog.syslog(syslog.LOG_ERR, error_msg)
+        return None
+
+
 def run_daemon(auth_cards: AuthorizedCards):
     """
     Run the RFID trigger daemon.
     Continuously monitors for NFC cards and triggers unlock for authorized ones.
+    Handles IOError from clf.connect() by reconnecting.
     """
     # Initialize syslog
     syslog.openlog('qrio-rfid', syslog.LOG_PID, syslog.LOG_DAEMON)
@@ -137,19 +155,15 @@ def run_daemon(auth_cards: AuthorizedCards):
 
     signal.signal(signal.SIGINT, signal_handler)
 
-    try:
-        clf = nfc.ContactlessFrontend('usb')
-        print(f"✅ Connected to NFC reader: {clf.device}\n")
-        syslog.syslog(syslog.LOG_INFO, f"Connected to NFC reader: {clf.device}")
-    except Exception as e:
-        error_msg = f"Could not connect to NFC reader: {e}"
-        print(f"❌ Error: {error_msg}")
+    clf = connect_to_reader()
+    if not clf:
         print("\nTroubleshooting:")
         print("  1. Make sure the Sony RC-S380 is connected via USB")
         print("  2. Check USB permissions (you may need to run as root or add udev rules)")
         print("  3. Run 'python3 -m nfc' to test the connection")
-        syslog.syslog(syslog.LOG_ERR, error_msg)
         sys.exit(1)
+
+    print()  # Blank line after connection message
 
     try:
         while not stop_flag['stop']:
@@ -159,6 +173,28 @@ def run_daemon(auth_cards: AuthorizedCards):
                 'targets': ['212F', '424F', '106A', '106B'],
                 'on-connect': lambda tag: False
             }, terminate=lambda: stop_flag['stop'])
+
+            # Handle IOError (returns False)
+            if tag is False:
+                print("⚠️  IOError detected - reconnecting to NFC reader...")
+                syslog.syslog(syslog.LOG_WARNING, "IOError from clf.connect(), attempting reconnection")
+                try:
+                    clf.close()
+                except Exception:
+                    pass
+                time.sleep(1)  # Brief delay before reconnect
+                clf = connect_to_reader()
+                if not clf:
+                    print("❌ Reconnection failed, retrying in 5s...")
+                    syslog.syslog(syslog.LOG_ERR, "Reconnection failed, retrying in 5s")
+                    time.sleep(5)
+                    clf = connect_to_reader()
+                    if not clf:
+                        print("❌ Reconnection failed again, exiting")
+                        syslog.syslog(syslog.LOG_ERR, "Reconnection failed after retry, exiting")
+                        break
+                print()  # Blank line after reconnection
+                continue
 
             if tag:
                 card_id = card_id_to_string(tag)
@@ -202,7 +238,11 @@ def run_daemon(auth_cards: AuthorizedCards):
         if stop_flag['stop']:
             print("\n\n👋 Daemon stopped")
             syslog.syslog(syslog.LOG_INFO, "Qrio RFID Trigger Daemon stopped")
-        clf.close()
+        if clf:
+            try:
+                clf.close()
+            except Exception:
+                pass
         syslog.closelog()
 
 
