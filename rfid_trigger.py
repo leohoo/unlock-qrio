@@ -27,6 +27,7 @@ from unlock_qrio import unlock_qrio_lock
 # Configuration
 CONFIG_FILE = Path.home() / ".config/qrio/authorized_cards.json"
 COOLDOWN_SECONDS = 5  # Prevent rapid repeated unlocks
+RECONNECT_INTERVAL = 300  # Proactive reconnect every 5 minutes
 
 
 class AuthorizedCards:
@@ -164,9 +165,29 @@ def run_daemon(auth_cards: AuthorizedCards):
         sys.exit(1)
 
     print()  # Blank line after connection message
+    last_reconnect = time.time()
 
     try:
         while not stop_flag['stop']:
+            # Proactive reconnect every RECONNECT_INTERVAL seconds
+            if time.time() - last_reconnect > RECONNECT_INTERVAL:
+                print(f"🔄 Proactive reconnect (every {RECONNECT_INTERVAL}s)...")
+                syslog.syslog(syslog.LOG_INFO, f"Proactive reconnect after {RECONNECT_INTERVAL}s")
+                try:
+                    clf.close()
+                except Exception:
+                    pass
+                clf = connect_to_reader()
+                if not clf:
+                    print("❌ Reconnection failed, retrying in 5s...")
+                    time.sleep(5)
+                    clf = connect_to_reader()
+                    if not clf:
+                        print("❌ Reconnection failed, exiting")
+                        break
+                last_reconnect = time.time()
+                print()
+
             # Poll for all NFC types simultaneously
             # The card_id_to_string() function will prefer FeliCa IDm when available
             tag = clf.connect(rdwr={
