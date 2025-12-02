@@ -134,6 +134,87 @@ def get_button_center(bounds: str) -> Optional[Tuple[int, int]]:
     return None
 
 
+def find_popup_button(button_text: str) -> Optional[Tuple[int, int]]:
+    """
+    Find a button by text in a popup dialog.
+    Returns coordinates as (x, y) tuple or None if not found.
+    """
+    try:
+        tree = ET.parse(TMP_CURRENT)
+        root = tree.getroot()
+
+        # Look for buttons with specific text (Later, Confirm, OK, etc.)
+        for elem in root.iter():
+            text = elem.get('text', '')
+            clickable = elem.get('clickable', 'false')
+            bounds = elem.get('bounds', '')
+
+            if clickable == 'true' and button_text.lower() in text.lower() and bounds:
+                coords = get_button_center(bounds)
+                if coords:
+                    return coords
+
+        return None
+    except Exception as e:
+        return None
+
+
+def dismiss_popup(verbose: bool = True) -> bool:
+    """
+    Detect and dismiss any popup dialogs by clicking "Later" or back button.
+    Returns True if a popup was dismissed, False otherwise.
+    """
+    try:
+        tree = ET.parse(TMP_CURRENT)
+        root = tree.getroot()
+
+        # Check for common popup indicators
+        popup_indicators = [
+            'Notifications',  # The popup header
+            'notification',
+            'dialog',
+            'popup'
+        ]
+
+        # Look for popup-related elements
+        has_popup = False
+        for elem in root.iter():
+            text = elem.get('text', '')
+            resource_id = elem.get('resource-id', '')
+            class_name = elem.get('class', '')
+
+            # Check if this looks like a popup
+            if any(indicator.lower() in text.lower() or indicator.lower() in resource_id.lower()
+                   for indicator in popup_indicators):
+                has_popup = True
+                break
+
+        if not has_popup:
+            return False
+
+        if verbose:
+            print("   ℹ️  Popup detected, attempting to dismiss...")
+
+        # Try to find and click "Later" button first (preferred)
+        coords = find_popup_button("Later")
+        if coords:
+            if verbose:
+                print(f"   👆 Tapping 'Later' button at ({coords[0]}, {coords[1]})...")
+            run_adb_command(["shell", "input", "tap", str(coords[0]), str(coords[1])])
+            time.sleep(0.5)  # Wait for popup to dismiss
+            return True
+
+        # If no "Later" button, try pressing back
+        if verbose:
+            print("   👆 Pressing back button to dismiss popup...")
+        run_adb_command(["shell", "input", "keyevent", "KEYCODE_BACK"])
+        time.sleep(0.5)
+        return True
+
+    except Exception as e:
+        return False
+
+
 def find_unlock_button() -> Optional[Tuple[int, int]]:
     """
     Analyze the UI dump to find the unlock button.
@@ -264,6 +345,12 @@ def unlock_qrio_lock(verbose: bool = True) -> bool:
             shutil.copy(TMP_CURRENT, UI_FINAL_PATH)
         except Exception:
             pass
+
+        # Check for and dismiss any popups
+        if dismiss_popup(verbose=verbose):
+            # Popup was dismissed, wait a moment and get fresh UI dump
+            time.sleep(0.5)
+            dump_ui_to_file()
 
         # Analyze UI to find unlock button
         coords = find_unlock_button()
