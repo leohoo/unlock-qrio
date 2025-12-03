@@ -166,6 +166,12 @@ def run_daemon(auth_cards: AuthorizedCards):
 
     print()  # Blank line after connection message
     last_reconnect = time.time()
+    last_poll = [time.time()]  # Use list to allow modification in nested function
+    POLL_TIMEOUT = 5  # Force clf.connect() to return every 5 seconds
+
+    def should_terminate():
+        """Return True to force clf.connect() to return periodically."""
+        return stop_flag['stop'] or (time.time() - last_poll[0] > POLL_TIMEOUT)
 
     try:
         while not stop_flag['stop']:
@@ -188,12 +194,14 @@ def run_daemon(auth_cards: AuthorizedCards):
                 last_reconnect = time.time()
                 print()
 
-            # Poll for all NFC types simultaneously
-            # The card_id_to_string() function will prefer FeliCa IDm when available
+            # Poll for NFC cards
+            # should_terminate() forces clf.connect() to return every POLL_TIMEOUT seconds
+            # so we can check the reconnect timer
+            last_poll[0] = time.time()
             tag = clf.connect(rdwr={
                 'targets': ['212F', '424F', '106A', '106B'],
                 'on-connect': lambda tag: False
-            }, terminate=lambda: stop_flag['stop'])
+            }, terminate=should_terminate)
 
             # Handle IOError (returns False)
             if tag is False:
