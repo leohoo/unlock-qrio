@@ -161,55 +161,24 @@ def find_popup_button(button_text: str) -> Optional[Tuple[int, int]]:
 
 def dismiss_popup(verbose: bool = True) -> bool:
     """
-    Detect and dismiss any popup dialogs by clicking "Later" or back button.
+    Detect and dismiss popup dialogs by looking for common dismiss buttons.
+    Tries multiple button texts to handle various popup types.
     Returns True if a popup was dismissed, False otherwise.
     """
+    # Common dismiss button texts (case-insensitive matching)
+    dismiss_buttons = ['Later', 'OK', 'Cancel', 'Close', 'Dismiss', 'Not now', 'Skip']
+
     try:
-        tree = ET.parse(TMP_CURRENT)
-        root = tree.getroot()
+        for button_text in dismiss_buttons:
+            coords = find_popup_button(button_text)
+            if coords:
+                if verbose:
+                    print(f"   ℹ️  Popup detected, tapping '{button_text}' at ({coords[0]}, {coords[1]})...")
+                run_adb_command(["shell", "input", "tap", str(coords[0]), str(coords[1])])
+                time.sleep(0.5)  # Wait for popup to dismiss
+                return True
 
-        # Check for common popup indicators
-        popup_indicators = [
-            'Notifications',  # The popup header
-            'notification',
-            'dialog',
-            'popup'
-        ]
-
-        # Look for popup-related elements
-        has_popup = False
-        for elem in root.iter():
-            text = elem.get('text', '')
-            resource_id = elem.get('resource-id', '')
-            class_name = elem.get('class', '')
-
-            # Check if this looks like a popup
-            if any(indicator.lower() in text.lower() or indicator.lower() in resource_id.lower()
-                   for indicator in popup_indicators):
-                has_popup = True
-                break
-
-        if not has_popup:
-            return False
-
-        if verbose:
-            print("   ℹ️  Popup detected, attempting to dismiss...")
-
-        # Try to find and click "Later" button first (preferred)
-        coords = find_popup_button("Later")
-        if coords:
-            if verbose:
-                print(f"   👆 Tapping 'Later' button at ({coords[0]}, {coords[1]})...")
-            run_adb_command(["shell", "input", "tap", str(coords[0]), str(coords[1])])
-            time.sleep(0.5)  # Wait for popup to dismiss
-            return True
-
-        # If no "Later" button, try pressing back
-        if verbose:
-            print("   👆 Pressing back button to dismiss popup...")
-        run_adb_command(["shell", "input", "keyevent", "KEYCODE_BACK"])
-        time.sleep(0.5)
-        return True
+        return False
 
     except Exception as e:
         return False
