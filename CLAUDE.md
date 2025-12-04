@@ -200,3 +200,43 @@ unlock_qrio_lock(verbose=True)
    - Implemented smart ID selection that prefers stable FeliCa IDm
    - Enables Android phones with Mobile Suica to work as unlock credentials
    - Physical NFC cards and FeliCa cards both supported simultaneously
+
+### Performance Profiling Baseline (2024-12)
+
+**Test Environment:**
+- Device: Android phone connected via ADB over USB
+- Lock: Qrio Smart Lock connected via Bluetooth
+
+**Unlock Flow Timing:**
+
+| Step | Time | Notes |
+|------|------|-------|
+| Wake device | ~0.6s | KEYCODE_WAKEUP + swipe + sleeps |
+| Launch app | ~1.3s | am start + 1.0s sleep |
+| UI dump | ~3.0s | `uiautomator dump` - **main bottleneck** |
+| Popup dismiss | ~0.5s | If popup present |
+| Find button | <0.1s | XML parsing |
+| Tap button | ~0.2s | input tap command |
+
+**End-to-End Timing:**
+
+| Scenario | Time | UI Dumps |
+|----------|------|----------|
+| Warm start (app connected) | ~6-7s | 1 |
+| Cold start (no popup) | ~9-10s | 2 |
+| Cold start (with popup) | ~13-14s | 3 |
+
+**Key Bottleneck:**
+- `adb shell uiautomator dump` takes ~3 seconds per call
+- This is an Android/hardware limitation, not easily optimizable
+- Screenshot (`screencap`) is faster (~1-1.5s) but can't extract text
+
+**Optimization Strategies Tried:**
+1. Screenshot-based UI settlement: Faster but still needs 1 UI dump for button detection
+2. Skip settlement, check state directly: Reduced dumps from 3+ to 1-3
+3. Early return if already unlocked: Saves time on repeated unlocks
+
+**Future Optimization Ideas:**
+- Use image recognition to detect lock state from screenshot (avoid UI dump)
+- Cache button coordinates if UI layout is consistent
+- Reduce `SLEEP_AFTER_LAUNCH` if Bluetooth connection is fast
