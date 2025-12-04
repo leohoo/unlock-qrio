@@ -156,13 +156,27 @@ def run_daemon(auth_cards: AuthorizedCards):
 
     signal.signal(signal.SIGINT, signal_handler)
 
-    clf = connect_to_reader()
-    if not clf:
-        print("\nTroubleshooting:")
-        print("  1. Make sure the Sony RC-S380 is connected via USB")
-        print("  2. Check USB permissions (you may need to run as root or add udev rules)")
-        print("  3. Run 'python3 -m nfc' to test the connection")
-        sys.exit(1)
+    # Initial connection with retry logic to prevent systemd restart loop
+    INITIAL_RETRY_DELAY = 10  # seconds between retries
+    clf = None
+    retry_count = 0
+    while not stop_flag['stop'] and not clf:
+        clf = connect_to_reader()
+        if not clf:
+            retry_count += 1
+            if retry_count == 1:
+                print("\nTroubleshooting:")
+                print("  1. Make sure the Sony RC-S380 is connected via USB")
+                print("  2. Check USB permissions (you may need to run as root or add udev rules)")
+                print("  3. Run 'python3 -m nfc' to test the connection")
+            print(f"\n⏳ Retrying in {INITIAL_RETRY_DELAY}s... (attempt {retry_count})")
+            syslog.syslog(syslog.LOG_WARNING, f"Initial connection failed, retrying in {INITIAL_RETRY_DELAY}s (attempt {retry_count})")
+            time.sleep(INITIAL_RETRY_DELAY)
+
+    if stop_flag['stop']:
+        print("\n👋 Stopped during initial connection")
+        syslog.syslog(syslog.LOG_INFO, "Daemon stopped during initial connection")
+        return
 
     print()  # Blank line after connection message
     last_reconnect = time.time()
