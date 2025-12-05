@@ -9,6 +9,7 @@ import time
 import json
 import signal
 import syslog
+import threading
 from pathlib import Path
 from typing import Set, Optional
 from datetime import datetime
@@ -27,7 +28,6 @@ from unlock_qrio import unlock_qrio_lock
 # Configuration
 CONFIG_FILE = Path.home() / ".config/qrio/authorized_cards.json"
 COOLDOWN_SECONDS = 5  # Prevent rapid repeated unlocks
-RECONNECT_INTERVAL = 300  # Proactive reconnect every 5 minutes
 
 
 class AuthorizedCards:
@@ -179,24 +179,44 @@ def run_daemon(auth_cards: AuthorizedCards):
         return
 
     print()  # Blank line after connection message
-    last_reconnect = time.time()
-    last_poll = [time.time()]  # Use list to allow modification in nested function
-    POLL_TIMEOUT = 5  # Force clf.connect() to return every 5 seconds
+    last_terminate_call = [time.time()]  # Track when terminate callback was last called
+    WATCHDOG_TIMEOUT = 10  # If terminate not called for 10s, clf.connect() is stuck
+    needs_reconnect = [False]  # Flag to signal watchdog triggered reconnect
 
-    def should_terminate():
-        """Return True to force clf.connect() to return periodically."""
-        return stop_flag['stop'] or (time.time() - last_poll[0] > POLL_TIMEOUT)
+    def terminate_callback():
+        """
+        Called by nfcpy between polling iterations.
+        Resets watchdog timer and checks for stop signal.
+        """
+        last_terminate_call[0] = time.time()
+        return stop_flag['stop']
+
+    def watchdog():
+        """
+        Watchdog thread that monitors if terminate callback is being called.
+        If clf.connect() is stuck (callback not called), close clf to force return.
+        """
+        while not stop_flag['stop']:
+            time.sleep(1)
+            elapsed = time.time() - last_terminate_call[0]
+            if elapsed > WATCHDOG_TIMEOUT:
+                print(f"⚠️  Watchdog: clf.connect() stuck for {int(elapsed)}s, forcing reconnect...")
+                syslog.syslog(syslog.LOG_WARNING, f"Watchdog triggered: clf.connect() stuck for {int(elapsed)}s")
+                needs_reconnect[0] = True
+                try:
+                    clf.close()  # This should cause clf.connect() to return with IOError
+                except Exception:
+                    pass
+                break  # Exit watchdog, main loop will restart it after reconnect
+
+    watchdog_thread = threading.Thread(target=watchdog, daemon=True)
+    watchdog_thread.start()
 
     try:
         while not stop_flag['stop']:
-            # Proactive reconnect every RECONNECT_INTERVAL seconds
-            if time.time() - last_reconnect > RECONNECT_INTERVAL:
-                print(f"🔄 Proactive reconnect (every {RECONNECT_INTERVAL}s)...")
-                syslog.syslog(syslog.LOG_INFO, f"Proactive reconnect after {RECONNECT_INTERVAL}s")
-                try:
-                    clf.close()
-                except Exception:
-                    pass
+            # Check if watchdog triggered reconnect
+            if needs_reconnect[0]:
+                needs_reconnect[0] = False
                 clf = connect_to_reader()
                 if not clf:
                     print("❌ Reconnection failed, retrying in 5s...")
@@ -205,17 +225,17 @@ def run_daemon(auth_cards: AuthorizedCards):
                     if not clf:
                         print("❌ Reconnection failed, exiting")
                         break
-                last_reconnect = time.time()
+                last_terminate_call[0] = time.time()
+                # Restart watchdog thread
+                watchdog_thread = threading.Thread(target=watchdog, daemon=True)
+                watchdog_thread.start()
                 print()
 
             # Poll for NFC cards
-            # should_terminate() forces clf.connect() to return every POLL_TIMEOUT seconds
-            # so we can check the reconnect timer
-            last_poll[0] = time.time()
             tag = clf.connect(rdwr={
                 'targets': ['212F', '424F', '106A', '106B'],
                 'on-connect': lambda tag: False
-            }, terminate=should_terminate)
+            }, terminate=terminate_callback)
 
             # Handle IOError (returns False)
             if tag is False:
