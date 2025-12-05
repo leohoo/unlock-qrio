@@ -179,39 +179,34 @@ def run_daemon(auth_cards: AuthorizedCards):
         return
 
     print()  # Blank line after connection message
-    last_terminate_call = [time.time()]  # Track when terminate callback was last called
-    WATCHDOG_TIMEOUT = 10  # If terminate not called for 10s, clf.connect() is stuck
+    in_connect = [False]  # True while inside clf.connect()
+    connect_start = [0.0]  # When clf.connect() was called
+    WATCHDOG_TIMEOUT = 10  # Max time clf.connect() should block
     needs_reconnect = [False]  # Flag to signal watchdog triggered reconnect
 
     def terminate_callback():
-        """
-        Called by nfcpy between polling iterations.
-        Resets watchdog timer and checks for stop signal.
-        """
-        now = time.time()
-        interval = now - last_terminate_call[0]
-        if interval > 0.1:  # Only log if interval > 100ms (avoid spam on first call)
-            print(f"   terminate_callback interval: {interval:.2f}s")
-        last_terminate_call[0] = now
+        """Called by nfcpy between polling iterations."""
+        print("   terminate_callback called")
         return stop_flag['stop']
 
     def watchdog():
         """
-        Watchdog thread that monitors if terminate callback is being called.
-        If clf.connect() is stuck (callback not called), close clf to force return.
+        Watchdog thread that monitors clf.connect() blocking time.
+        Runs independently - only triggers when clf.connect() blocks too long.
         """
         while not stop_flag['stop']:
             time.sleep(1)
-            elapsed = time.time() - last_terminate_call[0]
-            if elapsed > WATCHDOG_TIMEOUT:
-                print(f"⚠️  Watchdog: clf.connect() stuck for {int(elapsed)}s, forcing reconnect...")
-                syslog.syslog(syslog.LOG_WARNING, f"Watchdog triggered: clf.connect() stuck for {int(elapsed)}s")
-                needs_reconnect[0] = True
-                try:
-                    clf.close()  # This should cause clf.connect() to return with IOError
-                except Exception:
-                    pass
-                break  # Exit watchdog, main loop will restart it after reconnect
+            if in_connect[0]:
+                elapsed = time.time() - connect_start[0]
+                if elapsed > WATCHDOG_TIMEOUT:
+                    print(f"⚠️  Watchdog: clf.connect() blocked for {int(elapsed)}s, forcing reconnect...")
+                    syslog.syslog(syslog.LOG_WARNING, f"Watchdog triggered: clf.connect() blocked for {int(elapsed)}s")
+                    needs_reconnect[0] = True
+                    try:
+                        clf.close()  # This should cause clf.connect() to return with IOError
+                    except Exception:
+                        pass
+                    # Keep watchdog running - don't break
 
     watchdog_thread = threading.Thread(target=watchdog, daemon=True)
     watchdog_thread.start()
@@ -229,17 +224,16 @@ def run_daemon(auth_cards: AuthorizedCards):
                     if not clf:
                         print("❌ Reconnection failed, exiting")
                         break
-                last_terminate_call[0] = time.time()
-                # Restart watchdog thread
-                watchdog_thread = threading.Thread(target=watchdog, daemon=True)
-                watchdog_thread.start()
                 print()
 
             # Poll for NFC cards
+            connect_start[0] = time.time()
+            in_connect[0] = True
             tag = clf.connect(rdwr={
                 'targets': ['212F', '424F', '106A', '106B'],
                 'on-connect': lambda tag: False
             }, terminate=terminate_callback)
+            in_connect[0] = False
 
             # Handle IOError (returns False)
             if tag is False:
