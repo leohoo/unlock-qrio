@@ -179,10 +179,9 @@ def run_daemon(auth_cards: AuthorizedCards):
         return
 
     print()  # Blank line after connection message
-    last_activity = [time.time()]  # Reset by terminate_callback or when clf.connect() returns
-    WATCHDOG_TIMEOUT = 10  # Trigger if no activity for 10s while in clf.connect()
+    last_activity = [time.time()]  # Reset by terminate_callback
+    WATCHDOG_TIMEOUT = 10  # Force exit if no activity for 10s
     in_connect = [False]  # True while inside clf.connect()
-    needs_reconnect = [False]  # Flag to signal watchdog triggered reconnect
 
     terminate_count = [0]
 
@@ -197,44 +196,28 @@ def run_daemon(auth_cards: AuthorizedCards):
     def watchdog():
         """
         Watchdog thread that monitors clf.connect() for stuck state.
-        Triggers only if terminate_callback stops being called (no activity for 10s).
+        If no activity for WATCHDOG_TIMEOUT seconds, force exit process.
+        Does not touch clf - only monitors and exits if stuck.
         """
+        import os
         while not stop_flag['stop']:
             time.sleep(1)
             watchdog_tick[0] += 1
             # Log heartbeat every 60s
             if watchdog_tick[0] % 60 == 0:
                 syslog.syslog(syslog.LOG_INFO, f"Heartbeat: terminate_count={terminate_count[0]}, in_connect={in_connect[0]}")
+
             if in_connect[0]:
                 elapsed = time.time() - last_activity[0]
                 if elapsed > WATCHDOG_TIMEOUT:
-                    print(f"⚠️  Watchdog: no activity for {int(elapsed)}s, forcing reconnect...")
-                    syslog.syslog(syslog.LOG_WARNING, f"Watchdog triggered: no activity for {int(elapsed)}s, terminate_count={terminate_count[0]}")
-                    needs_reconnect[0] = True
-                    try:
-                        clf.close()  # This should cause clf.connect() to return with IOError
-                    except Exception:
-                        pass
-                    # Keep watchdog running
+                    syslog.syslog(syslog.LOG_ERR, f"Watchdog: no activity for {int(elapsed)}s, forcing process exit")
+                    os._exit(1)  # Force exit, let systemd restart
 
     watchdog_thread = threading.Thread(target=watchdog, daemon=True)
     watchdog_thread.start()
 
     try:
         while not stop_flag['stop']:
-            # Check if watchdog triggered reconnect
-            if needs_reconnect[0]:
-                needs_reconnect[0] = False
-                clf = connect_to_reader()
-                if not clf:
-                    print("❌ Reconnection failed, retrying in 5s...")
-                    time.sleep(5)
-                    clf = connect_to_reader()
-                    if not clf:
-                        print("❌ Reconnection failed, exiting")
-                        break
-                print()
-
             # Poll for NFC cards
             last_activity[0] = time.time()
             in_connect[0] = True
