@@ -188,7 +188,11 @@ def run_daemon(auth_cards: AuthorizedCards):
         Called by nfcpy between polling iterations.
         Resets watchdog timer and checks for stop signal.
         """
-        last_terminate_call[0] = time.time()
+        now = time.time()
+        interval = now - last_terminate_call[0]
+        if interval > 0.1:  # Only log if interval > 100ms (avoid spam on first call)
+            print(f"   terminate_callback interval: {interval:.2f}s")
+        last_terminate_call[0] = now
         return stop_flag['stop']
 
     def watchdog():
