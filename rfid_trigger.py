@@ -179,34 +179,34 @@ def run_daemon(auth_cards: AuthorizedCards):
         return
 
     print()  # Blank line after connection message
+    last_activity = [time.time()]  # Reset by terminate_callback or when clf.connect() returns
+    WATCHDOG_TIMEOUT = 10  # Trigger if no activity for 10s while in clf.connect()
     in_connect = [False]  # True while inside clf.connect()
-    connect_start = [0.0]  # When clf.connect() was called
-    WATCHDOG_TIMEOUT = 10  # Max time clf.connect() should block
     needs_reconnect = [False]  # Flag to signal watchdog triggered reconnect
 
     def terminate_callback():
         """Called by nfcpy between polling iterations."""
-        print("   terminate_callback called")
+        last_activity[0] = time.time()  # Reset watchdog timer
         return stop_flag['stop']
 
     def watchdog():
         """
-        Watchdog thread that monitors clf.connect() blocking time.
-        Runs independently - only triggers when clf.connect() blocks too long.
+        Watchdog thread that monitors clf.connect() for stuck state.
+        Triggers only if terminate_callback stops being called (no activity for 10s).
         """
         while not stop_flag['stop']:
             time.sleep(1)
             if in_connect[0]:
-                elapsed = time.time() - connect_start[0]
+                elapsed = time.time() - last_activity[0]
                 if elapsed > WATCHDOG_TIMEOUT:
-                    print(f"⚠️  Watchdog: clf.connect() blocked for {int(elapsed)}s, forcing reconnect...")
-                    syslog.syslog(syslog.LOG_WARNING, f"Watchdog triggered: clf.connect() blocked for {int(elapsed)}s")
+                    print(f"⚠️  Watchdog: no activity for {int(elapsed)}s, forcing reconnect...")
+                    syslog.syslog(syslog.LOG_WARNING, f"Watchdog triggered: no activity for {int(elapsed)}s")
                     needs_reconnect[0] = True
                     try:
                         clf.close()  # This should cause clf.connect() to return with IOError
                     except Exception:
                         pass
-                    # Keep watchdog running - don't break
+                    # Keep watchdog running
 
     watchdog_thread = threading.Thread(target=watchdog, daemon=True)
     watchdog_thread.start()
@@ -227,7 +227,7 @@ def run_daemon(auth_cards: AuthorizedCards):
                 print()
 
             # Poll for NFC cards
-            connect_start[0] = time.time()
+            last_activity[0] = time.time()
             in_connect[0] = True
             tag = clf.connect(rdwr={
                 'targets': ['212F', '424F', '106A', '106B'],
