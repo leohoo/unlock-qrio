@@ -184,10 +184,15 @@ def run_daemon(auth_cards: AuthorizedCards):
     in_connect = [False]  # True while inside clf.connect()
     needs_reconnect = [False]  # Flag to signal watchdog triggered reconnect
 
+    terminate_count = [0]
+
     def terminate_callback():
         """Called by nfcpy between polling iterations."""
         last_activity[0] = time.time()  # Reset watchdog timer
+        terminate_count[0] += 1
         return stop_flag['stop']
+
+    watchdog_tick = [0]
 
     def watchdog():
         """
@@ -196,11 +201,15 @@ def run_daemon(auth_cards: AuthorizedCards):
         """
         while not stop_flag['stop']:
             time.sleep(1)
+            watchdog_tick[0] += 1
+            # Log heartbeat every 60s
+            if watchdog_tick[0] % 60 == 0:
+                syslog.syslog(syslog.LOG_INFO, f"Heartbeat: terminate_count={terminate_count[0]}, in_connect={in_connect[0]}")
             if in_connect[0]:
                 elapsed = time.time() - last_activity[0]
                 if elapsed > WATCHDOG_TIMEOUT:
                     print(f"⚠️  Watchdog: no activity for {int(elapsed)}s, forcing reconnect...")
-                    syslog.syslog(syslog.LOG_WARNING, f"Watchdog triggered: no activity for {int(elapsed)}s")
+                    syslog.syslog(syslog.LOG_WARNING, f"Watchdog triggered: no activity for {int(elapsed)}s, terminate_count={terminate_count[0]}")
                     needs_reconnect[0] = True
                     try:
                         clf.close()  # This should cause clf.connect() to return with IOError
