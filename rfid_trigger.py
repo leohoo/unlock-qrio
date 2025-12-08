@@ -11,7 +11,7 @@ import signal
 import syslog
 import threading
 from pathlib import Path
-from typing import Set, Optional
+from typing import Dict, Optional
 from datetime import datetime
 import argparse
 
@@ -31,11 +31,11 @@ COOLDOWN_SECONDS = 5  # Prevent rapid repeated unlocks
 
 
 class AuthorizedCards:
-    """Manages the list of authorized NFC card IDs."""
+    """Manages the list of authorized NFC card IDs with optional names."""
 
     def __init__(self, config_file: Path):
         self.config_file = config_file
-        self.cards: Set[str] = set()
+        self.cards: Dict[str, str] = {}  # card_id -> name (empty string if no name)
         self.load()
 
     def load(self):
@@ -44,11 +44,20 @@ class AuthorizedCards:
             try:
                 with open(self.config_file, 'r') as f:
                     data = json.load(f)
-                    self.cards = set(data.get('authorized_cards', []))
+                    # Support both old format (list) and new format (dict with names)
+                    cards_data = data.get('authorized_cards', [])
+                    if isinstance(cards_data, list):
+                        # Old format: list of card IDs
+                        self.cards = {card_id: "" for card_id in cards_data}
+                    elif isinstance(cards_data, dict):
+                        # New format: dict of card_id -> name
+                        self.cards = cards_data
+                    else:
+                        self.cards = {}
                 print(f"✅ Loaded {len(self.cards)} authorized card(s)")
             except Exception as e:
                 print(f"⚠️  Warning: Could not load config: {e}")
-                self.cards = set()
+                self.cards = {}
         else:
             print(f"ℹ️  No config file found at {self.config_file}")
             print("   Create one or use --add-card to authorize cards")
@@ -57,21 +66,27 @@ class AuthorizedCards:
         """Save authorized card IDs to config file."""
         self.config_file.parent.mkdir(parents=True, exist_ok=True)
         with open(self.config_file, 'w') as f:
-            json.dump({'authorized_cards': list(self.cards)}, f, indent=2)
+            json.dump({'authorized_cards': self.cards}, f, indent=2)
         print(f"💾 Saved {len(self.cards)} authorized card(s)")
 
-    def add(self, card_id: str):
-        """Add a card ID to the authorized list."""
-        self.cards.add(card_id)
+    def add(self, card_id: str, name: str = ""):
+        """Add a card ID to the authorized list with optional name."""
+        self.cards[card_id] = name
         self.save()
-        print(f"✅ Added card: {card_id}")
+        if name:
+            print(f"✅ Added card: {card_id} ({name})")
+        else:
+            print(f"✅ Added card: {card_id}")
 
     def remove(self, card_id: str):
         """Remove a card ID from the authorized list."""
         if card_id in self.cards:
-            self.cards.remove(card_id)
+            name = self.cards.pop(card_id)
             self.save()
-            print(f"✅ Removed card: {card_id}")
+            if name:
+                print(f"✅ Removed card: {card_id} ({name})")
+            else:
+                print(f"✅ Removed card: {card_id}")
         else:
             print(f"⚠️  Card not found: {card_id}")
 
@@ -79,12 +94,27 @@ class AuthorizedCards:
         """Check if a card ID is authorized."""
         return card_id in self.cards
 
+    def get_name(self, card_id: str) -> str:
+        """Get the name associated with a card ID."""
+        return self.cards.get(card_id, "")
+
+    def get_display_name(self, card_id: str) -> str:
+        """Get card ID with name for display (e.g., 'CARD_ID (Name)' or just 'CARD_ID')."""
+        name = self.get_name(card_id)
+        if name:
+            return f"{card_id} ({name})"
+        return card_id
+
     def list_cards(self):
         """Print all authorized cards."""
         if self.cards:
             print(f"\nAuthorized cards ({len(self.cards)}):")
-            for card_id in sorted(self.cards):
-                print(f"  - {card_id}")
+            for card_id in sorted(self.cards.keys()):
+                name = self.cards[card_id]
+                if name:
+                    print(f"  - {card_id} ({name})")
+                else:
+                    print(f"  - {card_id}")
         else:
             print("No authorized cards.")
 
@@ -245,28 +275,29 @@ def run_daemon(auth_cards: AuthorizedCards):
                 if auth_cards.is_authorized(card_id):
                     # Check cooldown
                     current_time = time.time()
+                    display_name = auth_cards.get_display_name(card_id)
                     if current_time - last_unlock_time >= COOLDOWN_SECONDS:
-                        print(f"[{timestamp}] ✅ Authorized card: {card_id}")
+                        print(f"[{timestamp}] ✅ Authorized card: {display_name}")
                         print("🔓 Triggering unlock...")
-                        syslog.syslog(syslog.LOG_INFO, f"Authorized card detected: {card_id}")
+                        syslog.syslog(syslog.LOG_INFO, f"Authorized card detected: {display_name}")
 
                         try:
                             success = unlock_qrio_lock(verbose=False)
                             if success:
                                 print("✅ Unlock successful!\n")
-                                syslog.syslog(syslog.LOG_INFO, f"Unlock successful for card: {card_id}")
+                                syslog.syslog(syslog.LOG_INFO, f"Unlock successful for card: {display_name}")
                                 last_unlock_time = current_time
                             else:
                                 print("❌ Unlock failed!\n")
-                                syslog.syslog(syslog.LOG_WARNING, f"Unlock failed for card: {card_id}")
+                                syslog.syslog(syslog.LOG_WARNING, f"Unlock failed for card: {display_name}")
                         except Exception as e:
-                            error_msg = f"Error during unlock for card {card_id}: {e}"
+                            error_msg = f"Error during unlock for card {display_name}: {e}"
                             print(f"❌ Error during unlock: {e}\n")
                             syslog.syslog(syslog.LOG_ERR, error_msg)
                     else:
                         remaining = int(COOLDOWN_SECONDS - (current_time - last_unlock_time))
                         print(f"[{timestamp}] ⏳ Card detected but in cooldown ({remaining}s remaining)")
-                        syslog.syslog(syslog.LOG_INFO, f"Authorized card in cooldown: {card_id} ({remaining}s remaining)")
+                        syslog.syslog(syslog.LOG_INFO, f"Authorized card in cooldown: {display_name} ({remaining}s remaining)")
                 else:
                     print(f"[{timestamp}] ⚠️  Unauthorized card: {card_id}")
                     print(f"   Use '--add-card {card_id}' to authorize\n")
@@ -384,7 +415,12 @@ def main():
     parser.add_argument(
         '--add-card',
         metavar='CARD_ID',
-        help='Add a card ID to the authorized list'
+        help='Add a card ID to the authorized list (also updates name if card exists)'
+    )
+    parser.add_argument(
+        '--name',
+        metavar='NAME',
+        help='Name for the card (use with --add-card)'
     )
     parser.add_argument(
         '--remove-card',
@@ -410,7 +446,7 @@ def main():
 
     # Handle card management commands
     if args.add_card:
-        auth_cards.add(args.add_card.upper())
+        auth_cards.add(args.add_card.upper(), args.name or "")
         return
 
     if args.remove_card:
