@@ -319,7 +319,7 @@ def run_daemon(auth_cards: AuthorizedCards):
         syslog.closelog()
 
 
-def scan_mode():
+def scan_mode(auth_cards: AuthorizedCards):
     """Scan and display card IDs without triggering unlock."""
     print("🔍 NFC Card Scanner")
     print("=" * 52)
@@ -381,7 +381,11 @@ def scan_mode():
                     if hasattr(tag, 'ndef'):
                         print(f"   NDEF: {tag.ndef}")
 
-                    print(f"   To authorize: ./rfid_trigger.py --add-card {card_id}\n")
+                    # Check if card is registered
+                    if auth_cards.is_authorized(card_id):
+                        print(f"   ✅ Registered: {auth_cards.get_display_name(card_id)}\n")
+                    else:
+                        print(f"   To authorize: ./rfid_trigger.py --add-card {card_id} --name \"NAME\"\n")
                     last_card_id = card_id
             else:
                 # No card detected, clear the last card
@@ -459,7 +463,7 @@ def main():
 
     # Run scan mode
     if args.scan:
-        scan_mode()
+        scan_mode(auth_cards)
         return
 
     # Run daemon mode
