@@ -9,6 +9,7 @@ import time
 import json
 import signal
 import syslog
+import threading
 from pathlib import Path
 from typing import Set, Optional
 from datetime import datetime
@@ -114,10 +115,28 @@ def scan_card(clf) -> Optional[str]:
     return None
 
 
+def connect_to_reader():
+    """
+    Connect to the NFC reader.
+    Returns ContactlessFrontend instance or None on failure.
+    """
+    try:
+        clf = nfc.ContactlessFrontend('usb')
+        print(f"✅ Connected to NFC reader: {clf.device}")
+        syslog.syslog(syslog.LOG_INFO, f"Connected to NFC reader: {clf.device}")
+        return clf
+    except Exception as e:
+        error_msg = f"Could not connect to NFC reader: {e}"
+        print(f"❌ Error: {error_msg}")
+        syslog.syslog(syslog.LOG_ERR, error_msg)
+        return None
+
+
 def run_daemon(auth_cards: AuthorizedCards):
     """
     Run the RFID trigger daemon.
     Continuously monitors for NFC cards and triggers unlock for authorized ones.
+    Handles IOError from clf.connect() by reconnecting.
     """
     # Initialize syslog
     syslog.openlog('qrio-rfid', syslog.LOG_PID, syslog.LOG_DAEMON)
@@ -137,28 +156,87 @@ def run_daemon(auth_cards: AuthorizedCards):
 
     signal.signal(signal.SIGINT, signal_handler)
 
-    try:
-        clf = nfc.ContactlessFrontend('usb')
-        print(f"✅ Connected to NFC reader: {clf.device}\n")
-        syslog.syslog(syslog.LOG_INFO, f"Connected to NFC reader: {clf.device}")
-    except Exception as e:
-        error_msg = f"Could not connect to NFC reader: {e}"
-        print(f"❌ Error: {error_msg}")
-        print("\nTroubleshooting:")
-        print("  1. Make sure the Sony RC-S380 is connected via USB")
-        print("  2. Check USB permissions (you may need to run as root or add udev rules)")
-        print("  3. Run 'python3 -m nfc' to test the connection")
-        syslog.syslog(syslog.LOG_ERR, error_msg)
-        sys.exit(1)
+    # Initial connection with retry logic to prevent systemd restart loop
+    INITIAL_RETRY_DELAY = 10  # seconds between retries
+    clf = None
+    retry_count = 0
+    while not stop_flag['stop'] and not clf:
+        clf = connect_to_reader()
+        if not clf:
+            retry_count += 1
+            if retry_count == 1:
+                print("\nTroubleshooting:")
+                print("  1. Make sure the Sony RC-S380 is connected via USB")
+                print("  2. Check USB permissions (you may need to run as root or add udev rules)")
+                print("  3. Run 'python3 -m nfc' to test the connection")
+            print(f"\n⏳ Retrying in {INITIAL_RETRY_DELAY}s... (attempt {retry_count})")
+            syslog.syslog(syslog.LOG_WARNING, f"Initial connection failed, retrying in {INITIAL_RETRY_DELAY}s (attempt {retry_count})")
+            time.sleep(INITIAL_RETRY_DELAY)
+
+    if stop_flag['stop']:
+        print("\n👋 Stopped during initial connection")
+        syslog.syslog(syslog.LOG_INFO, "Daemon stopped during initial connection")
+        return
+
+    print()  # Blank line after connection message
+    last_activity = [time.time()]  # Reset by terminate_callback
+    WATCHDOG_TIMEOUT = 10  # Force exit if no activity for 10s
+    in_connect = [False]  # True while inside clf.connect()
+
+    def terminate_callback():
+        """Called by nfcpy between polling iterations."""
+        last_activity[0] = time.time()  # Reset watchdog timer
+        return stop_flag['stop']
+
+    def watchdog():
+        """
+        Watchdog thread that monitors clf.connect() for stuck state.
+        If no activity for WATCHDOG_TIMEOUT seconds, force exit process.
+        """
+        import os
+        while not stop_flag['stop']:
+            time.sleep(1)
+            if in_connect[0]:
+                elapsed = time.time() - last_activity[0]
+                if elapsed > WATCHDOG_TIMEOUT:
+                    syslog.syslog(syslog.LOG_ERR, f"Watchdog: no activity for {int(elapsed)}s, forcing process exit")
+                    os._exit(1)  # Force exit, let systemd restart
+
+    watchdog_thread = threading.Thread(target=watchdog, daemon=True)
+    watchdog_thread.start()
 
     try:
         while not stop_flag['stop']:
-            # Poll for all NFC types simultaneously
-            # The card_id_to_string() function will prefer FeliCa IDm when available
+            # Poll for NFC cards
+            last_activity[0] = time.time()
+            in_connect[0] = True
             tag = clf.connect(rdwr={
                 'targets': ['212F', '424F', '106A', '106B'],
                 'on-connect': lambda tag: False
-            }, terminate=lambda: stop_flag['stop'])
+            }, terminate=terminate_callback)
+            in_connect[0] = False
+
+            # Handle IOError (returns False)
+            if tag is False:
+                print("⚠️  IOError detected - reconnecting to NFC reader...")
+                syslog.syslog(syslog.LOG_WARNING, "IOError from clf.connect(), attempting reconnection")
+                try:
+                    clf.close()
+                except Exception:
+                    pass
+                time.sleep(1)  # Brief delay before reconnect
+                clf = connect_to_reader()
+                if not clf:
+                    print("❌ Reconnection failed, retrying in 5s...")
+                    syslog.syslog(syslog.LOG_ERR, "Reconnection failed, retrying in 5s")
+                    time.sleep(5)
+                    clf = connect_to_reader()
+                    if not clf:
+                        print("❌ Reconnection failed again, exiting")
+                        syslog.syslog(syslog.LOG_ERR, "Reconnection failed after retry, exiting")
+                        break
+                print()  # Blank line after reconnection
+                continue
 
             if tag:
                 card_id = card_id_to_string(tag)
@@ -202,7 +280,11 @@ def run_daemon(auth_cards: AuthorizedCards):
         if stop_flag['stop']:
             print("\n\n👋 Daemon stopped")
             syslog.syslog(syslog.LOG_INFO, "Qrio RFID Trigger Daemon stopped")
-        clf.close()
+        if clf:
+            try:
+                clf.close()
+            except Exception:
+                pass
         syslog.closelog()
 
 
