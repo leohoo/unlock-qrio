@@ -52,6 +52,9 @@ python3 unlock_qrio.py
 2. **Authorize a card:**
    ```bash
    ./rfid_trigger.py --add-card CARD_ID_HERE
+
+   # Or with a name for easier identification
+   ./rfid_trigger.py --add-card CARD_ID_HERE --name "Wei's Phone"
    ```
 
 3. **List authorized cards:**
@@ -69,6 +72,12 @@ python3 unlock_qrio.py
 5. **Remove a card:**
    ```bash
    ./rfid_trigger.py --remove-card CARD_ID_HERE
+   ```
+
+6. **Update a card's name:**
+   ```bash
+   # Re-add with new name to update
+   ./rfid_trigger.py --add-card CARD_ID_HERE --name "New Name"
    ```
 
 ### Configuration
@@ -364,6 +373,22 @@ Key constants in `rfid_trigger.py`:
 
 ## Development
 
+### Setup
+
+```bash
+# Install production dependencies only
+pip install -r requirements.txt
+
+# Install development dependencies (includes pytest)
+pip install -r requirements-dev.txt
+```
+
+### Running Tests
+
+```bash
+pytest test_rfid_trigger.py -v
+```
+
 ### Using as a Library
 
 ```python
@@ -385,9 +410,11 @@ unlock-qrio/
 ├── unlock_qrio.py          # Core unlock logic
 ├── unlock_qrio.sh          # Legacy bash script (deprecated)
 ├── rfid_trigger.py         # RFID trigger daemon
-├── requirements.txt        # Python dependencies
-├── README.md              # This file
-├── CLAUDE.md              # Development guide
+├── test_rfid_trigger.py    # Tests for rfid_trigger.py
+├── requirements.txt        # Production dependencies
+├── requirements-dev.txt    # Development dependencies
+├── README.md               # This file
+├── CLAUDE.md               # Development guide
 └── .gitignore
 ```
 
