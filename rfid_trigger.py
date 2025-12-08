@@ -183,30 +183,19 @@ def run_daemon(auth_cards: AuthorizedCards):
     WATCHDOG_TIMEOUT = 10  # Force exit if no activity for 10s
     in_connect = [False]  # True while inside clf.connect()
 
-    terminate_count = [0]
-
     def terminate_callback():
         """Called by nfcpy between polling iterations."""
         last_activity[0] = time.time()  # Reset watchdog timer
-        terminate_count[0] += 1
         return stop_flag['stop']
-
-    watchdog_tick = [0]
 
     def watchdog():
         """
         Watchdog thread that monitors clf.connect() for stuck state.
         If no activity for WATCHDOG_TIMEOUT seconds, force exit process.
-        Does not touch clf - only monitors and exits if stuck.
         """
         import os
         while not stop_flag['stop']:
             time.sleep(1)
-            watchdog_tick[0] += 1
-            # Log heartbeat every 60s
-            if watchdog_tick[0] % 60 == 0:
-                syslog.syslog(syslog.LOG_INFO, f"Heartbeat: terminate_count={terminate_count[0]}, in_connect={in_connect[0]}")
-
             if in_connect[0]:
                 elapsed = time.time() - last_activity[0]
                 if elapsed > WATCHDOG_TIMEOUT:
