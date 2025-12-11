@@ -10,8 +10,10 @@ This is a utility for automating the unlocking of Qrio Smart Lock via Android De
 
 - `unlock_qrio.py` - Core unlock logic (importable module + CLI)
 - `rfid_trigger.py` - RFID-triggered unlock daemon for Sony RC-S380
+- `test_rfid_trigger.py` - Unit tests for rfid_trigger.py
 - `unlock_qrio.sh` - Legacy bash script with embedded Python (deprecated)
-- `requirements.txt` - Python dependencies (nfcpy)
+- `requirements.txt` - Production dependencies (nfcpy)
+- `requirements-dev.txt` - Development dependencies (pytest)
 - `README.md` - User documentation
 
 ## Architecture
@@ -75,9 +77,14 @@ Event-driven daemon for RFID-triggered unlock:
 
 ## Installation
 
+Local development environment is managed using [uv](https://docs.astral.sh/uv/).
+
 ```bash
-# Install dependencies
-pip install -r requirements.txt
+# Install dependencies (creates .venv automatically)
+uv sync
+
+# For development (includes pytest)
+uv sync --all-extras
 
 # Make scripts executable
 chmod +x unlock_qrio.py rfid_trigger.py
@@ -99,6 +106,9 @@ python3 unlock_qrio.py
 
 # Authorize a card
 ./rfid_trigger.py --add-card CARD_ID
+
+# Authorize a card with a name
+./rfid_trigger.py --add-card CARD_ID --name "Wei's Phone"
 
 # Run daemon
 ./rfid_trigger.py --daemon
@@ -150,6 +160,10 @@ Timing constants in `rfid_trigger.py`:
 ### Modifying RFID Trigger (`rfid_trigger.py`)
 
 - **Card Storage**: `AuthorizedCards` class manages JSON config at `~/.config/qrio/authorized_cards.json`
+  - Config format: `{"authorized_cards": {"CARD_ID": "Name", ...}}` (dict of card_id → name)
+  - Empty string for name if not set; backward compatible with old list format
+  - Use `--name` argument with `--add-card` to assign friendly names
+  - Names appear in syslog entries and daemon output as `CARD_ID (Name)`
 - **Card ID Format**: Always converted to uppercase hex via `card_id_to_string(tag)` at line ~90
   - Prefers FeliCa IDm (`tag.idm`) when available (stable for Mobile Suica)
   - Falls back to standard UID (`tag.identifier`) for regular NFC cards
@@ -166,6 +180,13 @@ Timing constants in `rfid_trigger.py`:
   - The `terminate` callback in `clf.connect()` checks `stop_flag['stop']` to break out of blocking NFC reads
   - This allows Ctrl+C to work even when waiting for NFC cards
 - **USB Permissions**: On Linux, may require udev rules for non-root access (see README.md)
+
+### Running Tests
+
+```bash
+# Run all tests
+uv run pytest test_rfid_trigger.py -v
+```
 
 ### Testing Without Hardware
 
