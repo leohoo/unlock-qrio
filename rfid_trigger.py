@@ -445,6 +445,11 @@ def main():
 
     args = parser.parse_args()
 
+    # Validate --name requires --add-card
+    if args.name and not args.add_card:
+        print("⚠️  --name requires --add-card")
+        return
+
     # Load authorized cards
     auth_cards = AuthorizedCards(args.config)
 
