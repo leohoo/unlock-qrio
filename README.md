@@ -341,6 +341,69 @@ EOF'
 # Then follow steps 2-5 above
 ```
 
+## Android Device Optimization
+
+When using a dedicated Android device for Qrio automation (e.g., connected to a Raspberry Pi), you may encounter stability issues over time. The device can become unresponsive due to memory pressure from background services.
+
+### Common Symptoms
+
+- Device stops responding to ADB commands after running for days
+- `adb devices` shows device as "unauthorized" or "offline"
+- System watchdog reboots (check with `adb shell getprop sys.boot.reason`)
+
+### Recommended Optimizations
+
+These settings reduce memory usage and improve long-term stability:
+
+```bash
+# 1. Disable Play Store (saves ~600 MB RAM)
+adb shell pm disable-user --user 0 com.android.vending
+
+# 2. Disable Google Search/Assistant (saves ~466 MB RAM)
+adb shell pm disable-user --user 0 com.google.android.googlequicksearchbox
+
+# 3. Limit background processes (prevents memory buildup)
+adb shell settings put global background_process_limit 4
+```
+
+**Note:** Keep Google Play Services (`com.google.android.gms`) enabled - the Qrio app may require it.
+
+### To Undo These Changes
+
+```bash
+adb shell pm enable com.android.vending
+adb shell pm enable com.google.android.googlequicksearchbox
+adb shell settings put global background_process_limit -1
+```
+
+### Monitoring Device Health
+
+```bash
+# Check boot reason (reboot = watchdog, shutdown = user/battery)
+adb shell getprop sys.boot.reason
+
+# Check available memory
+adb shell cat /proc/meminfo | grep MemAvailable
+
+# Check running processes by memory usage
+adb shell ps -A -o PID,RSS,NAME --sort=-RSS | head -20
+
+# Check for system crashes
+adb shell dumpsys dropbox --print | grep -i watchdog
+```
+
+### Scheduled Maintenance (Optional)
+
+Add a cron job on your Raspberry Pi to reboot the phone daily:
+
+```bash
+# Edit crontab
+crontab -e
+
+# Add line to reboot phone at 4 AM daily
+0 4 * * * adb reboot
+```
+
 ## Configuration Options
 
 ### Timing Configuration (`unlock_qrio.py`)
