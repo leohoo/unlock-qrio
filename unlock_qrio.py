@@ -282,6 +282,48 @@ def cleanup():
     )
 
 
+def quit_qrio_app(verbose: bool = True):
+    """Force quit the Qrio app to prevent error dialogs from accumulating."""
+    if verbose:
+        print("🚪 Quitting Qrio app...")
+    run_adb_command(["shell", "am", "force-stop", QRIO_PACKAGE], capture_output=True)
+
+
+def verify_unlock(verbose: bool = True, max_attempts: int = 5) -> bool:
+    """
+    Verify that the lock was successfully unlocked by reading the UI state.
+
+    Args:
+        verbose: If True, prints status messages.
+        max_attempts: Maximum number of attempts to verify unlock state.
+
+    Returns:
+        True if unlock was confirmed, False otherwise.
+    """
+    if verbose:
+        print("🔍 Verifying unlock...")
+
+    for attempt in range(max_attempts):
+        time.sleep(0.5)  # Wait for UI to update
+        dump_ui_to_file()
+        lock_state = get_lock_state()
+
+        if lock_state == 'Unlocked':
+            if verbose:
+                print("✅ Unlock confirmed!")
+            return True
+        elif lock_state == 'Locked':
+            if verbose:
+                print(f"   Still locked... (attempt {attempt + 1}/{max_attempts})")
+        else:
+            if verbose:
+                print(f"   State: {lock_state} (attempt {attempt + 1}/{max_attempts})")
+
+    if verbose:
+        print("⚠️  Could not confirm unlock")
+    return False
+
+
 def save_final_ui_dump():
     """Save the final UI dump for inspection."""
     try:
@@ -352,6 +394,7 @@ def unlock_qrio_lock(verbose: bool = True) -> bool:
             if lock_state == 'Unlocked':
                 if verbose:
                     print("✅ Already unlocked!")
+                quit_qrio_app(verbose=verbose)
                 return True
             elif lock_state == 'Locked':
                 if verbose:
@@ -382,10 +425,14 @@ def unlock_qrio_lock(verbose: bool = True) -> bool:
                 print("⚠️  Using default coordinates (360, 684)")
             run_adb_command(["shell", "input", "tap", "360", "684"])
 
-        if verbose:
-            print("✅ Unlock command sent!")
-
-        return True
+        # Verify unlock was successful
+        if verify_unlock(verbose=verbose):
+            quit_qrio_app(verbose=verbose)
+            return True
+        else:
+            if verbose:
+                print("⚠️  Unlock not confirmed, leaving app open for manual check")
+            return False
 
     except Exception as e:
         if verbose:
