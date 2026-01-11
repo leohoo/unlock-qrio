@@ -305,7 +305,10 @@ def verify_unlock(verbose: bool = True, max_attempts: int = 5) -> bool:
 
     for attempt in range(max_attempts):
         time.sleep(0.5)  # Wait for UI to update
-        dump_ui_to_file()
+        if not dump_ui_to_file():
+            if verbose:
+                print(f"   Failed to dump UI (attempt {attempt + 1}/{max_attempts})")
+            continue
         lock_state = get_lock_state()
 
         if lock_state == 'Unlocked':
