@@ -6,7 +6,6 @@ Wakes device, goes to Home screen, and taps the Qrio widget.
 
 import subprocess
 import time
-import sys
 
 # CONFIGURATION
 # Coordinates of the widget (found via scan)
@@ -17,38 +16,66 @@ WIDGET_Y = 359
 
 
 def run_adb(args):
-    """Run an ADB command."""
+    """
+    Run an ADB command.
+    
+    Returns:
+        bool: True if the command completed successfully, False otherwise.
+    """
     cmd = ["adb"] + args
     try:
         subprocess.run(cmd, check=True, capture_output=True, text=True)
+        return True
     except subprocess.CalledProcessError as e:
         print(f"❌ ADB command failed: {' '.join(cmd)}")
         if e.stderr:
             print(f"   Stderr: {e.stderr.strip()}")
+        return False
 
 
 def unlock_via_widget():
-    """Wake the screen, ensure Home screen is visible, and tap widget."""
+    """
+    Wake the screen, ensure Home screen is visible, and tap widget.
+    
+    Returns:
+        bool: True if all ADB commands succeeded, False otherwise.
+    """
     print("📱 Waking device & going to Home...")
     
+    success = True
+    
     # 1. Wake up
-    run_adb(["shell", "input", "keyevent", "KEYCODE_WAKEUP"])
-    time.sleep(0.3)
+    if not run_adb(["shell", "input", "keyevent", "KEYCODE_WAKEUP"]):
+        success = False
+    time.sleep(0.1)
     
     # 2. Dismiss Keyguard (Unlock screen)
-    # 82 = KEYCODE_MENU (often unlocks swipe screens)
-    run_adb(["shell", "input", "keyevent", "82"])
-    time.sleep(0.5)
+    if not run_adb(["shell", "wm", "dismiss-keyguard"]):
+        success = False
+    time.sleep(0.1)
 
     # 3. Force Home Screen (ensures we are looking at the widget)
-    run_adb(["shell", "input", "keyevent", "KEYCODE_HOME"])
-    time.sleep(0.5)
+    # Sending it twice handles cases where an app folder is open or we're in a submenu
+    if not run_adb(["shell", "input", "keyevent", "KEYCODE_HOME"]):
+        success = False
+    time.sleep(0.1)
+    if not run_adb(["shell", "input", "keyevent", "KEYCODE_HOME"]):
+        success = False
+    time.sleep(0.3)  # Wait for animation
 
     # 4. Tap the widget
     print(f"👆 Tapping widget at ({WIDGET_X}, {WIDGET_Y})...")
-    run_adb(["shell", "input", "tap", str(WIDGET_X), str(WIDGET_Y)])
-    print("✅ Unlock command sent!")
+    if not run_adb(["shell", "input", "tap", str(WIDGET_X), str(WIDGET_Y)]):
+        success = False
+
+    if success:
+        print("✅ Unlock command sent!")
+    else:
+        print("❌ Unlock failed; see ADB error output above.")
+    
+    return success
 
 
 if __name__ == "__main__":
-    unlock_via_widget()
+    success = unlock_via_widget()
+    exit(0 if success else 1)

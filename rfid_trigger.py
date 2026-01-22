@@ -283,12 +283,14 @@ def run_daemon(auth_cards: AuthorizedCards):
 
                         try:
                             # Use new fast widget unlock method
-                            unlock_via_widget()
-                            
-                            # If no exception raised, assume success
-                            print("✅ Unlock successful!\n")
-                            syslog.syslog(syslog.LOG_INFO, f"Unlock successful for card: {display_name}")
-                            last_unlock_time = current_time
+                            # unlock_via_widget returns True if ADB commands succeeded
+                            if unlock_via_widget():
+                                print("✅ Unlock successful!\n")
+                                syslog.syslog(syslog.LOG_INFO, f"Unlock successful for card: {display_name}")
+                                last_unlock_time = current_time
+                            else:
+                                print(f"❌ Error during unlock: ADB commands failed\n")
+                                syslog.syslog(syslog.LOG_ERR, f"Error during unlock for card {display_name}: ADB commands failed")
 
                         except Exception as e:
                             error_msg = f"Error during unlock for card {display_name}: {e}"
