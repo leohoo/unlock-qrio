@@ -22,7 +22,7 @@ except ImportError:
     print("Install it with: pip install nfcpy")
     sys.exit(1)
 
-from unlock_qrio import unlock_qrio_lock
+from unlock_via_widget import unlock_via_widget
 
 
 # Configuration
@@ -282,14 +282,14 @@ def run_daemon(auth_cards: AuthorizedCards):
                         syslog.syslog(syslog.LOG_INFO, f"Authorized card detected: {display_name}")
 
                         try:
-                            success = unlock_qrio_lock(verbose=False)
-                            if success:
-                                print("✅ Unlock successful!\n")
-                                syslog.syslog(syslog.LOG_INFO, f"Unlock successful for card: {display_name}")
-                                last_unlock_time = current_time
-                            else:
-                                print("❌ Unlock failed!\n")
-                                syslog.syslog(syslog.LOG_WARNING, f"Unlock failed for card: {display_name}")
+                            # Use new fast widget unlock method
+                            unlock_via_widget()
+                            
+                            # If no exception raised, assume success
+                            print("✅ Unlock successful!\n")
+                            syslog.syslog(syslog.LOG_INFO, f"Unlock successful for card: {display_name}")
+                            last_unlock_time = current_time
+
                         except Exception as e:
                             error_msg = f"Error during unlock for card {display_name}: {e}"
                             print(f"❌ Error during unlock: {e}\n")
