@@ -54,6 +54,9 @@ config.local.yaml
 # Logs
 *.log
 
+# Local Claude memory
+CLAUDE.local.md
+
 # Testing
 .pytest_cache/
 .coverage
