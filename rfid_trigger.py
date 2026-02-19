@@ -23,6 +23,7 @@ except ImportError:
     sys.exit(1)
 
 from unlock_via_widget import unlock_via_widget
+from notify import notify_success, notify_unauthorized, notify_cooldown
 
 
 # Configuration
@@ -287,6 +288,7 @@ def run_daemon(auth_cards: AuthorizedCards):
                             if unlock_via_widget():
                                 print("✅ Unlock successful!\n")
                                 syslog.syslog(syslog.LOG_INFO, f"Unlock successful for card: {display_name}")
+                                notify_success()
                                 last_unlock_time = current_time
                             else:
                                 print(f"❌ Error during unlock: ADB commands failed\n")
@@ -300,10 +302,12 @@ def run_daemon(auth_cards: AuthorizedCards):
                         remaining = int(COOLDOWN_SECONDS - (current_time - last_unlock_time))
                         print(f"[{timestamp}] ⏳ Card detected but in cooldown ({remaining}s remaining)")
                         syslog.syslog(syslog.LOG_INFO, f"Authorized card in cooldown: {display_name} ({remaining}s remaining)")
+                        notify_cooldown()
                 else:
                     print(f"[{timestamp}] ⚠️  Unauthorized card: {card_id}")
                     print(f"   Use '--add-card {card_id}' to authorize\n")
                     syslog.syslog(syslog.LOG_WARNING, f"Unauthorized card detected: {card_id}")
+                    notify_unauthorized()
 
             time.sleep(0.1)  # Small delay to prevent CPU spinning
 
