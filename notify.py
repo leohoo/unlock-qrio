@@ -29,7 +29,7 @@ def _adb(args: list) -> bool:
 def _torch(on: bool):
     """Turn torch on or off via sysfs LED path."""
     value = TORCH_ON if on else TORCH_OFF
-    _adb(["shell", "sh", "-c", f"echo {value} > {TORCH_LED}"])
+    _adb(["shell", f"echo {value} > {TORCH_LED}"])
 
 
 def _vibrate(pattern: str = "short"):
