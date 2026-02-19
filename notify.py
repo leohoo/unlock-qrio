@@ -9,7 +9,7 @@ import threading
 import time
 
 TORCH_LED = "/sys/class/leds/flashlight/brightness"
-TORCH_ON = "200"
+TORCH_ON = "50"
 TORCH_OFF = "0"
 
 
