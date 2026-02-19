@@ -37,12 +37,14 @@ class AuthorizedCards:
     def __init__(self, config_file: Path):
         self.config_file = config_file
         self.cards: Dict[str, str] = {}  # card_id -> name (empty string if no name)
+        self._last_mtime: float = 0
         self.load()
 
     def load(self):
         """Load authorized card IDs from config file."""
         if self.config_file.exists():
             try:
+                self._last_mtime = self.config_file.stat().st_mtime
                 with open(self.config_file, 'r') as f:
                     data = json.load(f)
                     # Support both old format (list) and new format (dict with names)
@@ -63,11 +65,25 @@ class AuthorizedCards:
             print(f"ℹ️  No config file found at {self.config_file}")
             print("   Create one or use --add-card to authorize cards")
 
+    def reload_if_changed(self):
+        """Reload config file if it has been modified since last load."""
+        if not self.config_file.exists():
+            return
+        try:
+            current_mtime = self.config_file.stat().st_mtime
+            if current_mtime != self._last_mtime:
+                print("🔄 Config file changed, reloading authorized cards...")
+                syslog.syslog(syslog.LOG_INFO, "Config file changed, reloading authorized cards")
+                self.load()
+        except Exception as e:
+            print(f"⚠️  Warning: Could not check config file: {e}")
+
     def save(self):
         """Save authorized card IDs to config file."""
         self.config_file.parent.mkdir(parents=True, exist_ok=True)
         with open(self.config_file, 'w') as f:
             json.dump({'authorized_cards': self.cards}, f, indent=2)
+        self._last_mtime = self.config_file.stat().st_mtime
         print(f"💾 Saved {len(self.cards)} authorized card(s)")
 
     def add(self, card_id: str, name: str = ""):
@@ -272,6 +288,8 @@ def run_daemon(auth_cards: AuthorizedCards):
             if tag:
                 card_id = card_id_to_string(tag)
                 timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+                auth_cards.reload_if_changed()
 
                 if auth_cards.is_authorized(card_id):
                     # Check cooldown
