@@ -213,6 +213,48 @@ class TestAuthorizedCardsList:
         assert "No authorized cards" in captured.out
 
 
+class TestReloadIfChanged:
+    """Tests for auto-reloading config when file changes."""
+
+    def test_reload_picks_up_new_card(self, temp_config):
+        """reload_if_changed picks up externally added cards."""
+        auth = AuthorizedCards(temp_config)
+        auth.add("ABC123", "Original")
+        assert len(auth.cards) == 1
+
+        # Simulate external modification (e.g., --add-card from another terminal)
+        import os, time
+        # Ensure mtime changes (some filesystems have 1s granularity)
+        time.sleep(0.05)
+        data = {"authorized_cards": {"ABC123": "Original", "DEF456": "New Card"}}
+        temp_config.write_text(json.dumps(data))
+        # Force mtime change in case write was too fast
+        os.utime(temp_config, (time.time() + 1, time.time() + 1))
+
+        auth.reload_if_changed()
+        assert len(auth.cards) == 2
+        assert auth.is_authorized("DEF456")
+        assert auth.get_name("DEF456") == "New Card"
+
+    def test_no_reload_when_unchanged(self, temp_config):
+        """reload_if_changed does nothing if file hasn't changed."""
+        auth = AuthorizedCards(temp_config)
+        auth.add("ABC123", "Test")
+
+        # Mutate in-memory state to verify reload doesn't happen
+        auth.cards["INJECTED"] = "Should stay"
+
+        auth.reload_if_changed()
+        assert "INJECTED" in auth.cards  # no reload occurred
+
+    def test_reload_nonexistent_file(self, temp_config):
+        """reload_if_changed is a no-op if config file doesn't exist."""
+        auth = AuthorizedCards(temp_config)
+        # File never created, should not raise
+        auth.reload_if_changed()
+        assert len(auth.cards) == 0
+
+
 class TestConfigFileSave:
     """Tests for config file format."""
 
