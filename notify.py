@@ -28,9 +28,12 @@ def _torch(on: bool):
     _adb(["shell", f"echo {value} > {TORCH_LED}"])
 
 
-def _vibrate(duration_ms: int = 200):
-    """Vibrate for given duration in ms."""
-    _adb(["shell", "cmd", "vibrator_manager", "synced", "-d", str(duration_ms), "prebaked", "1"])
+def _vibrate(pattern: str = "short"):
+    """Vibrate with a pattern: short (tap-tap) or long (buzz)."""
+    if pattern == "long":
+        _adb(["shell", "cmd", "vibrator_manager", "synced", "waveform", "-a", "600", "255"])
+    else:
+        _adb(["shell", "cmd", "vibrator_manager", "synced", "waveform", "-a", "80", "255", "100", "0", "80", "255"])
 
 
 def _flash_pattern(pattern: list):
@@ -56,7 +59,7 @@ def notify_success():
             (True, 0.1), (False, 0.1),
         ]
         _flash_pattern(pattern)
-        _vibrate(100)
+        _vibrate("short")
 
     threading.Thread(target=_run, daemon=True).start()
 
@@ -72,7 +75,7 @@ def notify_unauthorized():
             (True, 0.4), (False, 0.2),
         ]
         _flash_pattern(pattern)
-        _vibrate(500)
+        _vibrate("long")
 
     threading.Thread(target=_run, daemon=True).start()
 
