@@ -5,9 +5,12 @@ Provides flash + vibrate feedback on the connected Android device.
 """
 
 import subprocess
+import syslog
 import threading
 import time
 
+# Device-specific: Redmi 4X / LineageOS flashlight LED path.
+# For other devices, find yours with: adb shell ls /sys/class/leds/
 TORCH_LED = "/sys/class/leds/flashlight/brightness"
 TORCH_ON = "50"
 TORCH_OFF = "0"
@@ -18,14 +21,15 @@ def _adb(args: list) -> bool:
     try:
         subprocess.run(["adb"] + args, check=True, capture_output=True)
         return True
-    except subprocess.CalledProcessError:
+    except subprocess.CalledProcessError as e:
+        syslog.syslog(syslog.LOG_WARNING, f"ADB command failed: {' '.join(['adb'] + args)}")
         return False
 
 
 def _torch(on: bool):
     """Turn torch on or off via sysfs LED path."""
     value = TORCH_ON if on else TORCH_OFF
-    _adb(["shell", f"echo {value} > {TORCH_LED}"])
+    _adb(["shell", "sh", "-c", f"echo {value} > {TORCH_LED}"])
 
 
 def _vibrate(pattern: str = "short"):
@@ -85,7 +89,7 @@ def notify_cooldown():
     Card in cooldown — single short blink, no vibrate.
     """
     def _run():
-        pattern = [(True, 0.05), (False, 0.0)]
+        pattern = [(True, 0.05)]
         _flash_pattern(pattern)
 
     threading.Thread(target=_run, daemon=True).start()

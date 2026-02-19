@@ -10,6 +10,7 @@ This is a utility for automating the unlocking of Qrio Smart Lock via Android De
 
 - `unlock_qrio.py` - Core unlock logic (importable module + CLI)
 - `rfid_trigger.py` - RFID-triggered unlock daemon for Sony RC-S380
+- `notify.py` - ADB-based flash + vibrate notification feedback
 - `test_rfid_trigger.py` - Unit tests for rfid_trigger.py
 - `unlock_qrio.sh` - Legacy bash script with embedded Python (deprecated)
 - `requirements.txt` - Production dependencies (nfcpy)

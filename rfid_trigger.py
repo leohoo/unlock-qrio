@@ -23,7 +23,7 @@ except ImportError:
     sys.exit(1)
 
 from unlock_via_widget import unlock_via_widget
-from notify import notify_success, notify_unauthorized, notify_cooldown
+from notify import notify_success, notify_unauthorized, notify_cooldown, _torch
 
 
 # Configuration
@@ -317,6 +317,10 @@ def run_daemon(auth_cards: AuthorizedCards):
         if stop_flag['stop']:
             print("\n\n👋 Daemon stopped")
             syslog.syslog(syslog.LOG_INFO, "Qrio RFID Trigger Daemon stopped")
+        try:
+            _torch(False)
+        except Exception:
+            pass
         if clf:
             try:
                 clf.close()
