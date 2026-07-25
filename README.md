@@ -4,12 +4,11 @@ Automate unlocking of Qrio Smart Lock via Android Debug Bridge (ADB), with optio
 
 ## Features
 
-- **Automated Unlock**: Unlock Qrio Smart Lock via ADB with UI settling detection
+- **Fast Unlock**: Taps the Qrio home screen widget via ADB - under a second, no UI dump needed
 - **RFID Trigger**: Trigger unlock by scanning authorized NFC cards (Sony RC-S380)
 - **Multi-Protocol Support**: Works with both NFC (Type4Tag) and FeliCa (Type3Tag) cards
 - **Mobile Suica Support**: Use your Android phone with Mobile Suica as a stable unlock credential
-- **Smart Detection**: Waits for app UI to stabilize before attempting unlock
-- **Dynamic Button Finding**: Automatically locates unlock button in UI hierarchy
+- **Status Check**: Read the lock state (`--status`) without touching the lock
 - **Card Authorization**: Manage whitelist of authorized NFC cards and phone IDs
 
 ## Prerequisites
@@ -27,8 +26,13 @@ Automate unlocking of Qrio Smart Lock via Android Debug Bridge (ADB), with optio
 pip install -r requirements.txt
 
 # Make scripts executable
-chmod +x unlock_qrio.py rfid_trigger.py
+chmod +x unlock_qrio.py unlock_via_widget.py rfid_trigger.py
 ```
+
+**Home screen setup**: unlocking works by tapping the Qrio **unlock** widget on the phone's primary
+home screen. Place that widget first, then set `WIDGET_X`/`WIDGET_Y` in `unlock_via_widget.py` to its
+center. Only the unlock widget is used - Qrio's lock widget is deliberately not placed, which is why
+a repeated tap can never lock the door.
 
 ## Usage
 
@@ -40,7 +44,22 @@ Run the unlock script directly:
 python3 unlock_qrio.py
 # or
 ./unlock_qrio.py
+
+# Same widget tap, skipping the ADB connectivity check
+./unlock_via_widget.py
 ```
+
+### Check Lock Status
+
+Read-only - launches the app and reports state without tapping the widget, so the lock does not move:
+
+```bash
+./unlock_qrio.py --status
+# 🔍 Lock state: Locked
+# 📄 UI dump kept at /tmp/ui_current.xml
+```
+
+Exits 0 when the state is known, 1 when it comes back `Unknown`.
 
 ### RFID Trigger Setup
 
@@ -244,13 +263,22 @@ Nov 24 10:40:10 raspberrypi qrio-rfid[1234]: Unauthorized card detected: FEDCBA0
 
 ### Unlock Process
 
+1. Check for connected ADB device (`unlock_qrio.py` only)
+2. Wake the screen (`KEYCODE_WAKEUP`) and dismiss the keyguard (`wm dismiss-keyguard`)
+3. Press HOME twice, so the primary home screen with the Qrio widget is showing
+4. Tap the widget at `WIDGET_X`, `WIDGET_Y`
+
+No app launch and no `uiautomator dump`, which is what makes it fast. The trade-off is that the tap is
+blind: ADB reports success even if the coordinates hit empty space, so use `--status` to confirm
+actual lock state.
+
+### Status Process (`--status`)
+
 1. Check for connected ADB device
-2. Wake up device and unlock screen
-3. Launch Qrio app (reuses existing instance if already running)
-4. Wait for UI to stabilize (compares consecutive UI dumps)
-5. Parse UI hierarchy XML to find unlock button
-6. Tap the unlock button
-7. Clean up temporary files
+2. Wake the screen and launch the Qrio app (reuses the running instance)
+3. Dump the UI hierarchy, dismissing any dialog that covers the state text
+4. Read `Locked`/`Unlocked`/`Connecting` from the dump (up to 5 attempts while Bluetooth connects)
+5. Remove the on-device dump, keeping the local copy at `/tmp/ui_current.xml`
 
 ### RFID Trigger
 
@@ -262,7 +290,7 @@ Nov 24 10:40:10 raspberrypi qrio-rfid[1234]: Unauthorized card detected: FEDCBA0
    - For regular NFC cards: uses UID as identifier
    - Checks if card/phone ID is in authorized list
    - Applies cooldown to prevent rapid repeated unlocks (5 seconds default)
-   - Calls `unlock_qrio_lock()` function
+   - Calls `unlock_via_widget()` - the same function `unlock_qrio.py` uses
    - Logs the event with timestamp
 
 ## Troubleshooting
@@ -290,11 +318,17 @@ Nov 24 10:40:10 raspberrypi qrio-rfid[1234]: Unauthorized card detected: FEDCBA0
 - **Physical NFC cards** always have stable UIDs - recommended for simplicity
 - **iPhone NFC** is not supported (Apple restricts background NFC access)
 
-### UI Detection Issues
+### Unlock Does Nothing
 
-- Check saved UI dump: `~/sandbox/playground/ui_final.xml`
-- Adjust `UI_FINAL_PATH` in `unlock_qrio.py` if needed
-- Script falls back to coordinates (360, 684) if button not found
+The widget tap is blind - ADB reports success even when it hits empty space. If the lock never opens:
+
+- Run `./unlock_qrio.py --status` to see the actual lock state
+- Inspect the dump it leaves at `/tmp/ui_current.xml` and search for a `me.qrio.smartlock2` node whose
+  `bounds` contain `WIDGET_X`, `WIDGET_Y`
+- If the widget moved (or the launcher grid/density changed), update `WIDGET_X`/`WIDGET_Y` in
+  `unlock_via_widget.py`
+- If `--status` reports `Unknown`, the app may still be connecting over Bluetooth, or a dialog is in
+  the way whose buttons aren't in `dismiss_popup()`'s English-only label list
 
 ### Linux/Raspberry Pi USB Permissions
 
@@ -406,29 +440,30 @@ crontab -e
 
 ## Configuration Options
 
-### Timing Configuration (`unlock_qrio.py`)
+### Widget Coordinates (`unlock_via_widget.py`)
 
-The unlock timing has been optimized for speed while maintaining reliability:
+The only setting the unlock path has:
 
 ```python
-SLEEP_AFTER_WAKE = 0.3      # Wait after waking device (default: 0.3s)
-SLEEP_AFTER_SWIPE = 0.3     # Wait after unlock swipe (default: 0.3s)
-SLEEP_AFTER_LAUNCH = 1.0    # Wait after launching app (default: 1.0s)
-SLEEP_BETWEEN_DUMPS = 0.5   # Wait between UI dumps (default: 0.5s)
+WIDGET_X = 498    # Center of the Qrio widget on the primary home screen
+WIDGET_Y = 359
 ```
 
-**Total unlock time: ~2.6 seconds** (from wake to tap)
+**Total unlock time: ~0.6 seconds** (four ADB calls plus fixed sleeps)
 
-You can adjust these values if needed:
-- Decrease for faster unlocks (may be unstable)
-- Increase for slower devices or more reliability
+### Status Timing (`unlock_qrio.py`)
 
-### Other Configuration
+Used only by `--status`, which launches the app and dumps the UI:
 
-Key constants in `unlock_qrio.py`:
-- `MAX_ATTEMPTS`: Maximum UI settling detection attempts (default: 10)
-- `REQUIRED_STABLE`: Consecutive stable UI snapshots needed (default: 2)
-- `UI_FINAL_PATH`: Where to save final UI dump
+```python
+SLEEP_AFTER_WAKE = 0.3            # Wait after waking device
+SLEEP_AFTER_SWIPE = 0.3           # Wait after unlock swipe
+SLEEP_AFTER_LAUNCH = 1.0          # Wait after launching app
+SLEEP_BETWEEN_STATE_CHECKS = 0.5  # Wait between lock state checks
+MAX_STATE_ATTEMPTS = 5            # Dumps to try while Bluetooth connects
+```
+
+Each `uiautomator dump` costs ~3 seconds, so `--status` takes several seconds by nature.
 
 Key constants in `rfid_trigger.py`:
 - `COOLDOWN_SECONDS`: Minimum time between unlocks (default: 5)
@@ -449,30 +484,41 @@ pip install -r requirements-dev.txt
 ### Running Tests
 
 ```bash
-pytest test_rfid_trigger.py -v
+pytest test_unlock_qrio.py test_rfid_trigger.py -v
+
+# test_rfid_trigger.py needs nfcpy importable; without it, run just:
+pytest test_unlock_qrio.py -v
 ```
 
 ### Using as a Library
 
 ```python
-from unlock_qrio import unlock_qrio_lock
+from unlock_qrio import unlock_qrio_lock, check_lock_status
 
-# Unlock with verbose output
+# Unlock with verbose output (taps the widget - opens the door)
 unlock_qrio_lock(verbose=True)
 
 # Unlock silently
 success = unlock_qrio_lock(verbose=False)
 if success:
     print("Unlocked!")
+
+# Read state without moving the lock
+state = check_lock_status(verbose=False)   # "Locked" / "Unlocked" / "Connecting" / None
 ```
+
+Both raise `RuntimeError` when no ADB device is connected. To skip the ADB check, call
+`unlock_via_widget(verbose=False)` from `unlock_via_widget.py` directly - that is what the daemon does.
 
 ### Project Structure
 
 ```
 unlock-qrio/
-├── unlock_qrio.py          # Core unlock logic
-├── unlock_qrio.sh          # Legacy bash script (deprecated)
+├── unlock_via_widget.py    # The unlock path: taps the Qrio widget
+├── unlock_qrio.py          # CLI wrapper + --status diagnostics
 ├── rfid_trigger.py         # RFID trigger daemon
+├── notify.py               # Flash + vibrate feedback via ADB
+├── test_unlock_qrio.py     # Tests for unlock_qrio.py / unlock_via_widget.py
 ├── test_rfid_trigger.py    # Tests for rfid_trigger.py
 ├── requirements.txt        # Production dependencies
 ├── requirements-dev.txt    # Development dependencies

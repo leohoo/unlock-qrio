@@ -1,38 +1,37 @@
 #!/usr/bin/env python3
 """
-Qrio Smart Lock Unlock Script with UI settling detection.
-Waits for UI to stabilize before attempting unlock.
+Qrio Smart Lock CLI.
+
+Unlocking taps the home screen widget (see unlock_via_widget.py) - the same path the
+RFID daemon uses, so a manual run exercises production behaviour. Adds an ADB
+connectivity check on top of it, plus a read-only --status mode that reports the lock
+state from a UI dump.
 """
 
+import argparse
 import subprocess
 import sys
 import time
 import xml.etree.ElementTree as ET
 import re
-import shutil
-from pathlib import Path
 from typing import Optional, Tuple
+
+from unlock_via_widget import unlock_via_widget
 
 
 QRIO_PACKAGE = "me.qrio.smartlock2"
 QRIO_MAIN_ACTIVITY = "me.qrio.smartlock2/.presentation.lock.common.LockHomeActivity"
-MAX_ATTEMPTS = 10
-REQUIRED_STABLE = 2  # UI must be stable for 2 consecutive checks
 UI_DUMP_PATH = "/sdcard/ui_current.xml"
 TMP_CURRENT = "/tmp/ui_current.xml"
-TMP_PREVIOUS = "/tmp/ui_previous.xml"
-UI_FINAL_PATH = Path.home() / "sandbox/playground/ui_final.xml"
 
-# Screenshot paths for faster UI settlement detection
-SCREENSHOT_PATH = "/sdcard/screen.png"
-TMP_SCREEN_CURRENT = "/tmp/screen_current.png"
-TMP_SCREEN_PREVIOUS = "/tmp/screen_previous.png"
+# How many UI dumps to try while the app connects to the lock over Bluetooth
+MAX_STATE_ATTEMPTS = 5
 
 # Timing configuration (in seconds)
-SLEEP_AFTER_WAKE = 0.3      # Wait after waking device (default: 0.5)
-SLEEP_AFTER_SWIPE = 0.3     # Wait after unlock swipe (default: 0.5)
-SLEEP_AFTER_LAUNCH = 1.0    # Wait after launching app
-SLEEP_BETWEEN_CHECKS = 0.3  # Wait between screenshot checks (default: 0.5)
+SLEEP_AFTER_WAKE = 0.3          # Wait after waking device
+SLEEP_AFTER_SWIPE = 0.3         # Wait after unlock swipe
+SLEEP_AFTER_LAUNCH = 1.0        # Wait after launching app
+SLEEP_BETWEEN_STATE_CHECKS = 0.5  # Wait between lock state checks
 
 
 def run_adb_command(args: list, check: bool = True, capture_output: bool = False) -> subprocess.CompletedProcess:
@@ -48,9 +47,10 @@ def check_device_connected() -> bool:
     return any(line.strip().endswith("device") for line in result.stdout.splitlines()[1:])
 
 
-def wake_device():
+def wake_device(verbose: bool = True):
     """Wake up the device and unlock the screen."""
-    print("📲 Waking up device...")
+    if verbose:
+        print("📲 Waking up device...")
     run_adb_command(["shell", "input", "keyevent", "KEYCODE_WAKEUP"])
     time.sleep(SLEEP_AFTER_WAKE)
 
@@ -59,16 +59,17 @@ def wake_device():
     time.sleep(SLEEP_AFTER_SWIPE)
 
 
-def launch_qrio_app():
+def launch_qrio_app(verbose: bool = True):
     """Launch the Qrio Smart Lock app (reuses existing instance if already running)."""
-    print("🚀 Launching Qrio app...")
+    if verbose:
+        print("🚀 Launching Qrio app...")
     # Use FLAG_ACTIVITY_SINGLE_TOP (0x20000000) to reuse existing instance
     # This prevents creating duplicate instances if the activity is already running
     run_adb_command([
         "shell", "am", "start",
         "-n", QRIO_MAIN_ACTIVITY,
         "-f", "0x20000000"  # FLAG_ACTIVITY_SINGLE_TOP
-    ])
+    ], capture_output=True)
     time.sleep(SLEEP_AFTER_LAUNCH)
 
 
@@ -83,70 +84,6 @@ def dump_ui_to_file() -> bool:
         return True
     except subprocess.CalledProcessError:
         return False
-
-
-def files_are_identical(file1: str, file2: str) -> bool:
-    """Check if two files are identical."""
-    try:
-        with open(file1, 'rb') as f1, open(file2, 'rb') as f2:
-            return f1.read() == f2.read()
-    except FileNotFoundError:
-        return False
-
-
-def take_screenshot() -> bool:
-    """Take a screenshot and pull it to local temp file. ~3x faster than UI dump."""
-    try:
-        run_adb_command(
-            ["shell", "screencap", "-p", SCREENSHOT_PATH],
-            capture_output=True
-        )
-        run_adb_command(["pull", SCREENSHOT_PATH, TMP_SCREEN_CURRENT], capture_output=True)
-        return True
-    except subprocess.CalledProcessError:
-        return False
-
-
-def wait_for_ui_to_settle() -> bool:
-    """
-    Wait for the UI to stabilize by comparing consecutive screenshots.
-    Uses screenshots (~1s each) instead of UI dumps (~3s each) for speed.
-    After settling, does one UI dump for button detection.
-    """
-    print("⏳ Waiting for UI to settle...")
-    stable_count = 0
-
-    for i in range(1, MAX_ATTEMPTS + 1):
-        if not take_screenshot():
-            print(f"   ⚠️  Failed to take screenshot (attempt {i}/{MAX_ATTEMPTS})")
-            time.sleep(SLEEP_BETWEEN_CHECKS)
-            continue
-
-        if i > 1:
-            # Compare with previous screenshot
-            if files_are_identical(TMP_SCREEN_PREVIOUS, TMP_SCREEN_CURRENT):
-                stable_count += 1
-                print(f"   UI stable ({stable_count}/{REQUIRED_STABLE})")
-
-                if stable_count >= REQUIRED_STABLE:
-                    print("✅ UI has settled")
-                    # Now do one UI dump for button detection
-                    dump_ui_to_file()
-                    return True
-            else:
-                stable_count = 0
-                print(f"   UI still changing... (attempt {i}/{MAX_ATTEMPTS})")
-        else:
-            print("   Taking initial snapshot...")
-
-        # Copy current to previous for next iteration
-        shutil.copy(TMP_SCREEN_CURRENT, TMP_SCREEN_PREVIOUS)
-        time.sleep(SLEEP_BETWEEN_CHECKS)
-
-    print("⚠️  Warning: UI may not be fully settled, proceeding anyway...")
-    # Still do UI dump for button detection
-    dump_ui_to_file()
-    return False
 
 
 def get_button_center(bounds: str) -> Optional[Tuple[int, int]]:
@@ -199,7 +136,7 @@ def find_popup_button(button_text: str) -> Optional[Tuple[int, int]]:
                     return coords
 
         return None
-    except Exception as e:
+    except Exception:
         return None
 
 
@@ -224,189 +161,109 @@ def dismiss_popup(verbose: bool = True) -> bool:
 
         return False
 
-    except Exception as e:
+    except Exception:
         return False
 
 
-def find_unlock_button() -> Optional[Tuple[int, int]]:
-    """
-    Analyze the UI dump to find the unlock button.
-    Returns coordinates as (x, y) tuple or None if not found.
-    """
-    try:
-        tree = ET.parse(TMP_CURRENT)
-        root = tree.getroot()
-
-        # Look for the main unlock button (large circular button in center)
-        # It's a FrameLayout that's clickable and in the middle of the screen
-        for elem in root.iter():
-            clickable = elem.get('clickable', 'false')
-            bounds = elem.get('bounds', '')
-
-            if clickable == 'true' and bounds:
-                match = re.match(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]', bounds)
-                if match:
-                    x1, y1, x2, y2 = map(int, match.groups())
-                    width = x2 - x1
-                    height = y2 - y1
-
-                    # Look for large square-ish button in the middle area
-                    # The unlock button is typically 300-500px wide and centered
-                    if width > 300 and height > 300 and x1 < 300 and x2 > 400:
-                        coords = get_button_center(bounds)
-                        if coords:
-                            return coords
-
-        return None
-    except Exception as e:
-        print(f"   ⚠️  Error parsing UI: {e}")
-        return None
-
-
-def tap_unlock_button(x: int, y: int):
-    """Tap at the given coordinates."""
-    print(f"🔓 Tapping unlock button at ({x}, {y})...")
-    run_adb_command(["shell", "input", "tap", str(x), str(y)])
-    print("✅ Unlock command sent!")
-
-
 def cleanup():
-    """Clean up temporary files."""
-    for tmp_file in [TMP_CURRENT, TMP_PREVIOUS, TMP_SCREEN_CURRENT, TMP_SCREEN_PREVIOUS]:
-        Path(tmp_file).unlink(missing_ok=True)
-
+    """Remove the UI dump from the device (the local copy is kept for inspection)."""
     run_adb_command(
-        ["shell", "rm", "-f", UI_DUMP_PATH, SCREENSHOT_PATH],
+        ["shell", "rm", "-f", UI_DUMP_PATH],
         check=False,
         capture_output=True
     )
 
 
-def save_final_ui_dump():
-    """Save the final UI dump for inspection."""
-    try:
-        UI_FINAL_PATH.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy(TMP_CURRENT, UI_FINAL_PATH)
-        print(f"💾 Saved final UI state to {UI_FINAL_PATH}")
-    except Exception as e:
-        print(f"   ⚠️  Could not save final UI dump: {e}")
-
-
 def unlock_qrio_lock(verbose: bool = True) -> bool:
     """
-    Unlock the Qrio smart lock via ADB.
+    Unlock the Qrio smart lock by tapping its home screen widget.
+
+    This is the same path the RFID daemon uses (see unlock_via_widget.py), so it needs
+    no UI dump and takes well under a second.
 
     Args:
         verbose: If True, prints status messages. If False, runs silently.
 
     Returns:
-        True if unlock was successful, False otherwise.
+        True if the unlock command was sent, False otherwise.
 
     Raises:
         RuntimeError: If no ADB device is connected.
     """
-    if verbose:
-        print("🔓 Unlocking Qrio Smart Lock...")
+    if not check_device_connected():
+        raise RuntimeError("No ADB device connected")
 
-    # Check if device is connected
+    return unlock_via_widget(verbose=verbose)
+
+
+def check_lock_status(verbose: bool = True) -> Optional[str]:
+    """
+    Report the lock state without touching the widget.
+
+    Launches the app, dumps the UI, dismisses any popup in the way and reads the state
+    text. The local UI dump is left at TMP_CURRENT so it can be inspected - useful when
+    the state comes back unknown. Never taps the widget, so the lock does not move.
+
+    Args:
+        verbose: If True, prints progress messages. If False, runs silently.
+
+    Returns:
+        "Locked", "Unlocked", "Connecting", or None if the state is unknown.
+
+    Raises:
+        RuntimeError: If no ADB device is connected.
+    """
     if not check_device_connected():
         raise RuntimeError("No ADB device connected")
 
     try:
-        # Wake up device and unlock screen
-        if verbose:
-            wake_device()
-        else:
-            run_adb_command(["shell", "input", "keyevent", "KEYCODE_WAKEUP"])
-            time.sleep(SLEEP_AFTER_WAKE)
-            run_adb_command(["shell", "input", "swipe", "500", "1500", "500", "500"])
-            time.sleep(SLEEP_AFTER_SWIPE)
+        wake_device(verbose=verbose)
+        launch_qrio_app(verbose=verbose)
 
-        # Launch Qrio app
-        if verbose:
-            launch_qrio_app()
-        else:
-            run_adb_command([
-                "shell", "am", "start",
-                "-n", QRIO_MAIN_ACTIVITY,
-                "-f", "0x20000000"
-            ], capture_output=True)
-            time.sleep(SLEEP_AFTER_LAUNCH)
-
-        # Wait for app to be ready (shows "Locked" instead of "Connecting")
-        if verbose:
-            print("⏳ Waiting for app to connect...")
-
-        lock_state = None
-        max_connection_attempts = 5
-        for attempt in range(max_connection_attempts):
+        state = None
+        for attempt in range(1, MAX_STATE_ATTEMPTS + 1):
             dump_ui_to_file()
 
-            # Check for and dismiss any popups
+            # A popup can cover the state text, so clear it and dump again
             if dismiss_popup(verbose=verbose):
-                # Re-check state immediately after dismissing popup
                 dump_ui_to_file()
 
-            # Check lock state
-            lock_state = get_lock_state()
-            if lock_state == 'Unlocked':
-                if verbose:
-                    print("✅ Already unlocked!")
-                return True
-            elif lock_state == 'Locked':
-                if verbose:
-                    print("✅ App connected")
+            state = get_lock_state()
+            if state in ('Locked', 'Unlocked'):
                 break
 
             if verbose:
-                print(f"   Still connecting... (attempt {attempt + 1}/{max_connection_attempts})")
-            time.sleep(0.5)
+                print(f"   Still connecting... (attempt {attempt}/{MAX_STATE_ATTEMPTS})")
+            time.sleep(SLEEP_BETWEEN_STATE_CHECKS)
 
-        coords = find_unlock_button()
+        return state
 
-        # Save final UI dump for debugging
-        try:
-            UI_FINAL_PATH.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy(TMP_CURRENT, UI_FINAL_PATH)
-        except Exception:
-            pass
-
-        if coords:
-            x, y = coords
-            if verbose:
-                print(f"✅ Found unlock button at: {x} {y}")
-            tap_unlock_button(x, y)
-        else:
-            # Fallback to default coordinates
-            if verbose:
-                print("⚠️  Using default coordinates (360, 684)")
-            run_adb_command(["shell", "input", "tap", "360", "684"])
-
-        if verbose:
-            print("✅ Unlock command sent!")
-
-        return True
-
-    except Exception as e:
-        if verbose:
-            print(f"❌ Error: {e}")
-        return False
     finally:
-        # Always cleanup temporary files
         cleanup()
 
 
 def main():
     """Main execution flow for CLI usage."""
-    print("🔓 Qrio Smart Lock Unlock Script (with UI settling)")
-    print("=" * 52)
+    parser = argparse.ArgumentParser(
+        description="Unlock the Qrio Smart Lock by tapping its home screen widget."
+    )
+    parser.add_argument(
+        "--status",
+        action="store_true",
+        help="report the lock state without unlocking (read-only, does not move the lock)"
+    )
+    args = parser.parse_args()
 
     try:
-        unlock_qrio_lock(verbose=True)
-        print()
-        print("🎉 Done!")
-        print()
-        print(f"💡 Tip: Check {UI_FINAL_PATH} to see the final UI state")
+        if args.status:
+            state = check_lock_status(verbose=True)
+            print(f"🔍 Lock state: {state or 'Unknown'}")
+            print(f"📄 UI dump kept at {TMP_CURRENT}")
+            sys.exit(0 if state else 1)
+
+        print("🔓 Unlocking Qrio Smart Lock...")
+        sys.exit(0 if unlock_qrio_lock(verbose=True) else 1)
+
     except RuntimeError as e:
         print(f"❌ Error: {e}")
         sys.exit(1)
