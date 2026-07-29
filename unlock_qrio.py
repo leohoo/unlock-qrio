@@ -14,6 +14,7 @@ import sys
 import time
 import xml.etree.ElementTree as ET
 import re
+from pathlib import Path
 from typing import Optional, Tuple
 
 from unlock_via_widget import unlock_via_widget
@@ -35,14 +36,27 @@ SLEEP_BETWEEN_STATE_CHECKS = 0.5  # Wait between lock state checks
 
 
 def run_adb_command(args: list, check: bool = True, capture_output: bool = False) -> subprocess.CompletedProcess:
-    """Run an ADB command with the given arguments."""
+    """
+    Run an ADB command with the given arguments.
+
+    Raises:
+        RuntimeError: If the adb executable is not on PATH.
+        subprocess.CalledProcessError: If adb exits non-zero and check is True.
+    """
     cmd = ["adb"] + args
-    return subprocess.run(cmd, check=check, capture_output=capture_output, text=True)
+    try:
+        return subprocess.run(cmd, check=check, capture_output=capture_output, text=True)
+    except FileNotFoundError:
+        raise RuntimeError("adb not found in PATH - install Android platform-tools")
 
 
 def check_device_connected() -> bool:
     """Check if an Android device is connected via ADB."""
-    result = run_adb_command(["devices"], capture_output=True)
+    try:
+        result = run_adb_command(["devices"], capture_output=True)
+    except subprocess.CalledProcessError:
+        # If adb itself fails there is no usable device
+        return False
     # Look for lines ending with "device" (not "unauthorized" or other states)
     return any(line.strip().endswith("device") for line in result.stdout.splitlines()[1:])
 
@@ -204,6 +218,10 @@ def check_lock_status(verbose: bool = True) -> Optional[str]:
     text. The local UI dump is left at TMP_CURRENT so it can be inspected - useful when
     the state comes back unknown. Never taps the widget, so the lock does not move.
 
+    State is only ever read from a dump this call pulled successfully: any dump left by
+    an earlier run is deleted up front, and a failed dump yields None rather than a
+    stale answer.
+
     Args:
         verbose: If True, prints progress messages. If False, runs silently.
 
@@ -211,32 +229,44 @@ def check_lock_status(verbose: bool = True) -> Optional[str]:
         "Locked", "Unlocked", "Connecting", or None if the state is unknown.
 
     Raises:
-        RuntimeError: If no ADB device is connected.
+        RuntimeError: If no ADB device is connected, or adb is not on PATH.
     """
     if not check_device_connected():
         raise RuntimeError("No ADB device connected")
 
     try:
+        # A dump from an earlier run must never be mistaken for the current state
+        Path(TMP_CURRENT).unlink(missing_ok=True)
+
         wake_device(verbose=verbose)
         launch_qrio_app(verbose=verbose)
 
         state = None
         for attempt in range(1, MAX_STATE_ATTEMPTS + 1):
-            dump_ui_to_file()
+            fresh = dump_ui_to_file()
 
             # A popup can cover the state text, so clear it and dump again
-            if dismiss_popup(verbose=verbose):
-                dump_ui_to_file()
+            if fresh and dismiss_popup(verbose=verbose):
+                fresh = dump_ui_to_file()
 
-            state = get_lock_state()
-            if state in ('Locked', 'Unlocked'):
-                break
+            if fresh:
+                state = get_lock_state()
+                if state in ('Locked', 'Unlocked'):
+                    break
+            elif verbose:
+                print(f"   ⚠️  UI dump failed (attempt {attempt}/{MAX_STATE_ATTEMPTS})")
 
-            if verbose:
+            if verbose and fresh:
                 print(f"   Still connecting... (attempt {attempt}/{MAX_STATE_ATTEMPTS})")
             time.sleep(SLEEP_BETWEEN_STATE_CHECKS)
 
         return state
+
+    except subprocess.CalledProcessError as e:
+        # Device dropped offline mid-run (a documented failure mode on this setup)
+        if verbose:
+            print(f"❌ ADB command failed: {e}")
+        return None
 
     finally:
         cleanup()

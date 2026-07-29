@@ -36,6 +36,11 @@ def run_adb(args, verbose: bool = True):
             if e.stderr:
                 print(f"   Stderr: {e.stderr.strip()}")
         return False
+    except FileNotFoundError:
+        # adb missing from PATH - report failure instead of crashing the caller
+        if verbose:
+            print("❌ adb not found in PATH - install Android platform-tools")
+        return False
 
 
 def unlock_via_widget(verbose: bool = True):

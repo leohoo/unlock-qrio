@@ -85,6 +85,110 @@ class TestUnlockQrioLock:
             unlock_qrio.unlock_qrio_lock()
 
 
+class TestCheckLockStatus:
+    """--status must only ever report state from a dump it just pulled."""
+
+    @pytest.fixture
+    def stub_status(self, tmp_path, monkeypatch):
+        """Stub out the device interactions, returning the dump path."""
+        dump = tmp_path / "ui_current.xml"
+        monkeypatch.setattr(unlock_qrio, "TMP_CURRENT", str(dump))
+        monkeypatch.setattr(unlock_qrio, "check_device_connected", lambda: True)
+        monkeypatch.setattr(unlock_qrio, "wake_device", lambda verbose=True: None)
+        monkeypatch.setattr(unlock_qrio, "launch_qrio_app", lambda verbose=True: None)
+        monkeypatch.setattr(unlock_qrio, "dismiss_popup", lambda verbose=True: False)
+        monkeypatch.setattr(unlock_qrio, "cleanup", lambda: None)
+        monkeypatch.setattr(unlock_qrio, "SLEEP_BETWEEN_STATE_CHECKS", 0)
+        monkeypatch.setattr(unlock_qrio, "MAX_STATE_ATTEMPTS", 2)
+        return dump
+
+    def test_failed_dump_does_not_report_stale_state(self, stub_status, monkeypatch):
+        """A stale dump from an earlier run must not be reported as current state."""
+        stub_status.write_text(LOCKED_XML)
+        monkeypatch.setattr(unlock_qrio, "dump_ui_to_file", lambda: False)
+
+        assert unlock_qrio.check_lock_status(verbose=False) is None
+
+    def test_stale_dump_is_removed_up_front(self, stub_status, monkeypatch):
+        """The previous run's dump is deleted before any state is read."""
+        stub_status.write_text(LOCKED_XML)
+        monkeypatch.setattr(unlock_qrio, "dump_ui_to_file", lambda: False)
+
+        unlock_qrio.check_lock_status(verbose=False)
+        assert not stub_status.exists()
+
+    def test_reports_state_from_fresh_dump(self, stub_status, monkeypatch):
+        """A successful dump is parsed and returned."""
+        def fake_dump():
+            stub_status.write_text(LOCKED_XML)
+            return True
+
+        monkeypatch.setattr(unlock_qrio, "dump_ui_to_file", fake_dump)
+
+        assert unlock_qrio.check_lock_status(verbose=False) == "Locked"
+
+    def test_device_dropping_offline_returns_none(self, stub_status, monkeypatch):
+        """A mid-run ADB failure yields None instead of a traceback."""
+        def offline(verbose=True):
+            raise subprocess.CalledProcessError(1, ["adb", "shell", "input"], stderr="device offline")
+
+        monkeypatch.setattr(unlock_qrio, "wake_device", offline)
+
+        assert unlock_qrio.check_lock_status(verbose=False) is None
+
+    def test_raises_without_device(self, monkeypatch):
+        """No ADB device is an error, not an unknown state."""
+        monkeypatch.setattr(unlock_qrio, "check_device_connected", lambda: False)
+
+        with pytest.raises(RuntimeError, match="No ADB device connected"):
+            unlock_qrio.check_lock_status(verbose=False)
+
+
+class TestAdbAvailability:
+    """A missing adb binary must not produce a traceback."""
+
+    def test_run_adb_command_raises_runtime_error(self, monkeypatch):
+        """unlock_qrio surfaces a missing adb as RuntimeError, which main() handles."""
+        def no_adb(*args, **kwargs):
+            raise FileNotFoundError(2, "No such file or directory", "adb")
+
+        monkeypatch.setattr(unlock_qrio.subprocess, "run", no_adb)
+
+        with pytest.raises(RuntimeError, match="adb not found in PATH"):
+            unlock_qrio.run_adb_command(["devices"], capture_output=True)
+
+    def test_check_device_connected_false_on_adb_error(self, monkeypatch):
+        """`adb devices` failing means no usable device, not a crash."""
+        def failing(*args, **kwargs):
+            raise subprocess.CalledProcessError(1, ["adb", "devices"])
+
+        monkeypatch.setattr(unlock_qrio.subprocess, "run", failing)
+
+        assert unlock_qrio.check_device_connected() is False
+
+    def test_widget_tap_returns_false_without_adb(self, monkeypatch, capsys):
+        """unlock_via_widget reports failure (silently) when adb is missing."""
+        def no_adb(*args, **kwargs):
+            raise FileNotFoundError(2, "No such file or directory", "adb")
+
+        monkeypatch.setattr(unlock_via_widget.subprocess, "run", no_adb)
+        monkeypatch.setattr(unlock_via_widget.time, "sleep", lambda _: None)
+
+        assert unlock_via_widget.unlock_via_widget(verbose=False) is False
+        assert capsys.readouterr().out == ""
+
+    def test_widget_tap_reports_missing_adb_when_verbose(self, monkeypatch, capsys):
+        """Verbose mode explains why the tap failed."""
+        def no_adb(*args, **kwargs):
+            raise FileNotFoundError(2, "No such file or directory", "adb")
+
+        monkeypatch.setattr(unlock_via_widget.subprocess, "run", no_adb)
+        monkeypatch.setattr(unlock_via_widget.time, "sleep", lambda _: None)
+
+        unlock_via_widget.unlock_via_widget()
+        assert "adb not found in PATH" in capsys.readouterr().out
+
+
 class TestGetLockState:
     """Lock state is read from the pulled UI dump."""
 
