@@ -8,35 +8,47 @@ This is a utility for automating the unlocking of Qrio Smart Lock via Android De
 
 ## Files
 
-- `unlock_qrio.py` - Core unlock logic (importable module + CLI)
+- `unlock_via_widget.py` - The unlock path: taps the Qrio home screen widget (importable + CLI)
+- `unlock_qrio.py` - CLI wrapper around the widget tap, plus read-only `--status` diagnostics
 - `rfid_trigger.py` - RFID-triggered unlock daemon for Sony RC-S380
 - `notify.py` - ADB-based flash + vibrate notification feedback
+- `test_unlock_qrio.py` - Unit tests for unlock_qrio.py and unlock_via_widget.py
 - `test_rfid_trigger.py` - Unit tests for rfid_trigger.py
-- `unlock_qrio.sh` - Legacy bash script with embedded Python (deprecated)
 - `requirements.txt` - Production dependencies (nfcpy)
 - `requirements-dev.txt` - Development dependencies (pytest)
 - `README.md` - User documentation
 
 ## Architecture
 
-### Core Unlock Module (`unlock_qrio.py`)
+### Unlock Path (`unlock_via_widget.py`)
 
-Designed as both an importable module and CLI tool:
+The only way the codebase unlocks the lock. Both the daemon and the CLI call `unlock_via_widget(verbose=True)`:
 
-1. **Device Communication Layer** (`run_adb_command`): Uses `subprocess` module to execute ADB commands
-2. **UI Detection System** (`wait_for_ui_to_settle`): Implements UI stability detection by comparing consecutive `uiautomator` dumps
-3. **Dynamic UI Analysis** (`find_unlock_button`): Parses XML UI hierarchy using `xml.etree.ElementTree` to locate the unlock button
-4. **Public API** (`unlock_qrio_lock(verbose=True)`): Main function for programmatic use
-5. **CLI Entry Point** (`main`): Wrapper for command-line usage
+1. `KEYCODE_WAKEUP` to wake the screen
+2. `wm dismiss-keyguard` to get past the lock screen
+3. `KEYCODE_HOME` twice (handles an open folder or submenu)
+4. `input tap 498 359` on the Qrio widget
 
 **Key Technical Approach**:
-- Waits for the Qrio app UI to "settle" by comparing consecutive UI dumps (binary file comparison)
-- Requires 2 consecutive stable UI snapshots before proceeding (configurable via `REQUIRED_STABLE`)
+- No `uiautomator dump` anywhere on this path - that call costs ~3s, which is why unlocking used to take 6-14s and now takes well under a second
+- The widget coordinates (`WIDGET_X`/`WIDGET_Y`, lines 14-15) are hardcoded. **If the widget is moved, or the launcher grid/density changes, unlocking breaks silently** - `input tap` always succeeds, so the daemon still reports success
+- Only Qrio's **unlock** widget is on the home screen; the lock widget was deliberately never added. Taps are therefore idempotent - a repeat tap cannot lock the door
+- Blind by design: it reports success whenever ADB exits 0, and cannot tell whether the door actually opened. Use `unlock_qrio.py --status` to see actual lock state
+
+### CLI + Diagnostics (`unlock_qrio.py`)
+
+1. **Device Communication Layer** (`run_adb_command`): Uses `subprocess` module to execute ADB commands
+2. **Public API** (`unlock_qrio_lock(verbose=True)`): Checks ADB connectivity (raises `RuntimeError` if no device), then delegates to `unlock_via_widget()`
+3. **Status Diagnostics** (`check_lock_status(verbose=True)`): Launches the app, dumps the UI, dismisses popups, returns `"Locked"`/`"Unlocked"`/`"Connecting"`/`None`. Never taps the widget, so it cannot move the lock
+4. **Lock State Reader** (`get_lock_state`): Parses the UI dump with `xml.etree.ElementTree`, matching state text
+5. **Popup Handling** (`find_popup_button`, `dismiss_popup`): Finds clickable nodes by text and taps them to clear dialogs covering the state text
+6. **CLI Entry Point** (`main`): `argparse` - no flags unlocks, `--status` reports state
+
+**Key Technical Approach**:
 - Uses `FLAG_ACTIVITY_SINGLE_TOP` to reuse existing app instance (prevents duplicate activities)
-- Searches for clickable elements >300px wide/tall in the center screen area (x1 < 300, x2 > 400)
-- Falls back to hardcoded coordinates (360, 684) if dynamic button detection fails
-- Saves final UI dump to `~/sandbox/playground/ui_final.xml` for inspection
-- Uses `finally` block to ensure cleanup of temporary files even on errors
+- `--status` deliberately **keeps** the pulled dump at `/tmp/ui_current.xml` and prints its path - when the state comes back `Unknown`, the raw XML is the only way to see why
+- `cleanup()` (in a `finally` block) removes only the on-device dump at `/sdcard/ui_current.xml`
+- `dismiss_popup()`'s label list is English-only (`Later`, `OK`, `Cancel`, `Close`, `Dismiss`, `Not now`, `Skip`). A localised dialog (e.g. 後で) will not match - verify against a real dump before trusting it
 
 ### RFID Trigger Daemon (`rfid_trigger.py`)
 
@@ -56,8 +68,8 @@ Event-driven daemon for RFID-triggered unlock:
 8. **Syslog Integration**: Logs all events to syslog for system monitoring and auditing
 
 **Design Decisions**:
-- Imports `unlock_qrio_lock()` function from core module (no code duplication)
-- Silent unlock mode (`verbose=False`) for daemon operation
+- Imports `unlock_via_widget()` (unlock) and `notify.py` helpers (feedback) - no code duplication. It does **not** import `unlock_qrio.py`
+- Calls `unlock_via_widget()` with default `verbose=True`, so unlock progress lands in the journal (`journalctl -u qrio-rfid`)
 - JSON config stored in `~/.config/qrio/authorized_cards.json`
 - Card IDs stored as uppercase hex strings for consistency
 - Scan mode (`--scan`) for discovering card IDs without triggering unlock
@@ -88,7 +100,7 @@ uv sync
 uv sync --all-extras
 
 # Make scripts executable
-chmod +x unlock_qrio.py rfid_trigger.py
+chmod +x unlock_qrio.py unlock_via_widget.py rfid_trigger.py
 ```
 
 ## Running the Scripts
@@ -98,6 +110,16 @@ chmod +x unlock_qrio.py rfid_trigger.py
 python3 unlock_qrio.py
 # or
 ./unlock_qrio.py
+
+# Same tap, without the ADB connectivity check
+./unlock_via_widget.py
+```
+
+### Lock Status (read-only, does not move the lock)
+```bash
+./unlock_qrio.py --status
+# 🔍 Lock state: Locked
+# 📄 UI dump kept at /tmp/ui_current.xml
 ```
 
 ### RFID Trigger Daemon
@@ -117,46 +139,44 @@ python3 unlock_qrio.py
 
 ## Configuration
 
-Key constants in `unlock_qrio.py` (lines 17-30):
+**Widget coordinates** in `unlock_via_widget.py` (lines 14-15) - the only config the unlock path has:
+
+- `WIDGET_X` / `WIDGET_Y`: `498, 359` - center of the Qrio widget on the primary home screen
+
+Key constants in `unlock_qrio.py` (lines 22-33), all used only by `--status`:
 
 - `QRIO_PACKAGE`: Android package name (`me.qrio.smartlock2`)
 - `QRIO_MAIN_ACTIVITY`: Main activity to launch (`me.qrio.smartlock2/.presentation.lock.common.LockHomeActivity`)
-- `MAX_ATTEMPTS`: Maximum UI settling detection attempts (default: 10)
-- `REQUIRED_STABLE`: Number of consecutive stable UI snapshots needed (default: 2)
-- `UI_FINAL_PATH`: Where to save final UI dump (default: `~/sandbox/playground/ui_final.xml`)
+- `UI_DUMP_PATH`: On-device dump path (`/sdcard/ui_current.xml`, removed on exit)
+- `TMP_CURRENT`: Local dump path (`/tmp/ui_current.xml`, deliberately kept for inspection)
+- `MAX_STATE_ATTEMPTS`: Dumps to try while the app connects over Bluetooth (default: 5)
 
-**Timing Configuration** (optimized for speed, ~2.6s total unlock time):
+**Timing Configuration** (`--status` only - the unlock path uses fixed 0.1s/0.3s sleeps in `unlock_via_widget.py`):
 - `SLEEP_AFTER_WAKE`: 0.3s - Wait after waking device
 - `SLEEP_AFTER_SWIPE`: 0.3s - Wait after unlock swipe
 - `SLEEP_AFTER_LAUNCH`: 1.0s - Wait after launching app
-- `SLEEP_BETWEEN_DUMPS`: 0.5s - Wait between UI dumps
+- `SLEEP_BETWEEN_STATE_CHECKS`: 0.5s - Wait between lock state checks
 
 Timing constants in `rfid_trigger.py`:
 - `COOLDOWN_SECONDS`: 5s - Minimum time between unlocks
 
 ## Troubleshooting
 
-- If the script fails to find the unlock button, check the saved UI dump at `~/sandbox/playground/ui_final.xml`
-- The script saves temporary UI dumps to `/tmp/ui_current.xml` and `/tmp/ui_previous.xml` during execution (auto-cleaned on exit)
-- Default tap coordinates (360, 684) are used as fallback if dynamic detection fails
-- The `UI_FINAL_PATH` constant may need adjustment for different user environments
+- **Unlock silently does nothing**: the widget tap landed on empty space. Run `./unlock_qrio.py --status` and check the dump at `/tmp/ui_current.xml` for a `me.qrio.smartlock2` node containing (498, 359); if the widget moved, update `WIDGET_X`/`WIDGET_Y`
+- **`--status` reports `Unknown`**: the app was still connecting, or a dialog/localised UI defeated the text matching. Inspect `/tmp/ui_current.xml` - it is left in place for exactly this
+- `--status` removes the on-device dump (`/sdcard/ui_current.xml`) but keeps the local copy
 
 ## Development Notes
 
-### Modifying Core Unlock Logic (`unlock_qrio.py`)
+### Modifying Unlock Logic
 
-- **Main API**: `unlock_qrio_lock(verbose=True)` at line ~201 - this is the primary entry point for imports
-- **Button Detection**: `find_unlock_button()` at line ~133 searches for clickable elements >300px wide/tall in center area
-- **UI Settling**: `files_are_identical()` at line ~81 uses binary file comparison
-- **Sleep Timings**: All timing uses configurable constants (lines 26-30):
-  - `SLEEP_AFTER_WAKE` = 0.3s (after device wake)
-  - `SLEEP_AFTER_SWIPE` = 0.3s (after screen unlock swipe)
-  - `SLEEP_AFTER_LAUNCH` = 1.0s (after launching app, reduced from 2.0s due to `FLAG_ACTIVITY_SINGLE_TOP`)
-  - `SLEEP_BETWEEN_DUMPS` = 0.5s (between UI dumps, reduced from 1.0s)
-  - Total unlock time: ~2.6 seconds (40% faster than original 4.5s)
+- **Unlock path**: `unlock_via_widget(verbose=True)` in `unlock_via_widget.py` - change this and both the daemon and the CLI change together
+- **Main API**: `unlock_qrio_lock(verbose=True)` in `unlock_qrio.py` - ADB check + delegation; raises `RuntimeError` when no device is connected
+- **Diagnostics**: `check_lock_status(verbose=True)` - the only code that still calls `uiautomator dump`
+- **Sleep Timings** (`--status` only): `SLEEP_AFTER_WAKE` 0.3s, `SLEEP_AFTER_SWIPE` 0.3s, `SLEEP_AFTER_LAUNCH` 1.0s (reduced from 2.0s due to `FLAG_ACTIVITY_SINGLE_TOP`), `SLEEP_BETWEEN_STATE_CHECKS` 0.5s
 - **Error Handling**: All ADB commands use `subprocess.run()` with proper error handling
-- **Cleanup**: `cleanup()` function ensures temporary files are removed even if script fails
-- **Verbose Mode**: When `verbose=False`, functions run silently for daemon use
+- **Cleanup**: `cleanup()` runs in a `finally` block and removes the on-device dump only
+- **Verbose Mode**: When `verbose=False`, both `unlock_via_widget()` and `check_lock_status()` run silently for daemon/API use
 
 ### Modifying RFID Trigger (`rfid_trigger.py`)
 
@@ -185,32 +205,43 @@ Timing constants in `rfid_trigger.py`:
 ### Running Tests
 
 ```bash
-# Run all tests
-uv run pytest test_rfid_trigger.py -v
+# Run all tests (test_rfid_trigger.py needs nfcpy importable)
+uv run --with pytest --with nfcpy pytest test_unlock_qrio.py test_rfid_trigger.py -v
+
+# unlock/diagnostics tests only - no hardware, no nfcpy
+uv run --with pytest pytest test_unlock_qrio.py -v
 ```
+
+Note: `rfid_trigger.py` calls `sys.exit(1)` at import when `nfc` is missing, so
+`test_rfid_trigger.py` cannot even be collected without nfcpy installed.
 
 ### Testing Without Hardware
 
 ```python
-# Test unlock logic without RFID reader
+# Test unlock logic without RFID reader (taps the widget - opens the door)
 from unlock_qrio import unlock_qrio_lock
 unlock_qrio_lock(verbose=True)
+
+# Read lock state without moving the lock
+from unlock_qrio import check_lock_status
+check_lock_status(verbose=True)
 ```
 
 ### Common Customizations
 
 - **Different NFC reader**: Modify `clf = nfc.ContactlessFrontend('usb')` in `rfid_trigger.py`
-- **Different unlock coordinates**: Change fallback at line ~280 in `unlock_qrio.py`
-- **Faster/slower unlock**: Adjust timing constants (lines 26-30) in `unlock_qrio.py`
+- **Different unlock coordinates**: Change `WIDGET_X`/`WIDGET_Y` (lines 14-15) in `unlock_via_widget.py`
+- **Faster/slower `--status`**: Adjust timing constants (lines 29-33) in `unlock_qrio.py`
 - **Custom cooldown**: Modify `COOLDOWN_SECONDS` in `rfid_trigger.py`
 - **Custom config path**: Use `--config` argument with `rfid_trigger.py`
 
 ### Recent Optimizations
 
-1. **Timing Optimization** (40% speed improvement):
-   - Reduced app launch wait from 2.0s → 1.0s (safe with `FLAG_ACTIVITY_SINGLE_TOP`)
-   - Reduced UI dump interval from 1.0s → 0.5s
-   - Reduced wake/swipe delays from 0.5s → 0.3s each
+1. **Widget-based unlocking** (the big one, #7): replaced the launch-app → `uiautomator dump` →
+   find-button → tap flow with a single tap on the Qrio home screen widget. Removes the ~3s-per-dump
+   bottleneck entirely, taking unlock from 6-14s to well under a second. `unlock_qrio.py` now
+   delegates to the same function, so manual runs exercise the daemon's actual path
+   - Trade-off: the tap is blind and the coordinates are hardcoded (see `unlock_via_widget.py`)
 
 2. **Signal Handling** (Ctrl+C responsiveness):
    - Added `signal.SIGINT` handlers in both `run_daemon()` and `scan_mode()`
@@ -223,13 +254,17 @@ unlock_qrio_lock(verbose=True)
    - Enables Android phones with Mobile Suica to work as unlock credentials
    - Physical NFC cards and FeliCa cards both supported simultaneously
 
-### Performance Profiling Baseline (2024-12)
+### Performance Profiling Baseline (2024-12, historical)
+
+**These numbers describe the dump-based unlock path, which no longer exists.** They are kept because
+they explain why the widget approach was adopted, and they still apply to `--status`, which is the
+only remaining caller of `uiautomator dump`.
 
 **Test Environment:**
 - Device: Android phone connected via ADB over USB
 - Lock: Qrio Smart Lock connected via Bluetooth
 
-**Unlock Flow Timing:**
+**Step Timing:**
 
 | Step | Time | Notes |
 |------|------|-------|
@@ -240,7 +275,7 @@ unlock_qrio_lock(verbose=True)
 | Find button | <0.1s | XML parsing |
 | Tap button | ~0.2s | input tap command |
 
-**End-to-End Timing:**
+**End-to-End Timing (old dump-based unlock):**
 
 | Scenario | Time | UI Dumps |
 |----------|------|----------|
@@ -248,17 +283,9 @@ unlock_qrio_lock(verbose=True)
 | Cold start (no popup) | ~9-10s | 2 |
 | Cold start (with popup) | ~13-14s | 3 |
 
-**Key Bottleneck:**
+Current unlock (widget tap) is ~0.6s: four ADB calls plus 0.6s of fixed sleeps, no dump, no app launch.
+
+**Key Bottleneck (still true for `--status`):**
 - `adb shell uiautomator dump` takes ~3 seconds per call
 - This is an Android/hardware limitation, not easily optimizable
 - Screenshot (`screencap`) is faster (~1-1.5s) but can't extract text
-
-**Optimization Strategies Tried:**
-1. Screenshot-based UI settlement: Faster but still needs 1 UI dump for button detection
-2. Skip settlement, check state directly: Reduced dumps from 3+ to 1-3
-3. Early return if already unlocked: Saves time on repeated unlocks
-
-**Future Optimization Ideas:**
-- Use image recognition to detect lock state from screenshot (avoid UI dump)
-- Cache button coordinates if UI layout is consistent
-- Reduce `SLEEP_AFTER_LAUNCH` if Bluetooth connection is fast
