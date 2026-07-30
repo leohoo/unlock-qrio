@@ -51,7 +51,13 @@ def run_adb_command(args: list, check: bool = True, capture_output: bool = False
 
 
 def check_device_connected() -> bool:
-    """Check if an Android device is connected via ADB."""
+    """
+    Check if an Android device is connected via ADB.
+
+    Raises:
+        RuntimeError: If the adb executable is not on PATH (a broken environment,
+            as opposed to a merely absent device, which returns False).
+    """
     try:
         result = run_adb_command(["devices"], capture_output=True)
     except subprocess.CalledProcessError:
@@ -288,7 +294,10 @@ def main():
         if args.status:
             state = check_lock_status(verbose=True)
             print(f"🔍 Lock state: {state or 'Unknown'}")
-            print(f"📄 UI dump kept at {TMP_CURRENT}")
+            if Path(TMP_CURRENT).exists():
+                print(f"📄 UI dump kept at {TMP_CURRENT}")
+            else:
+                print("📄 No UI dump available - every dump attempt failed")
             sys.exit(0 if state else 1)
 
         print("🔓 Unlocking Qrio Smart Lock...")

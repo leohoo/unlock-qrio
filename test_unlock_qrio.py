@@ -1,6 +1,7 @@
 """Tests for unlock_qrio.py delegation/diagnostics and unlock_via_widget.py."""
 
 import subprocess
+import sys
 import pytest
 
 import unlock_qrio
@@ -142,6 +143,38 @@ class TestCheckLockStatus:
 
         with pytest.raises(RuntimeError, match="No ADB device connected"):
             unlock_qrio.check_lock_status(verbose=False)
+
+
+class TestStatusCLI:
+    """--status must not point at a dump that does not exist."""
+
+    def test_reports_missing_dump(self, tmp_path, monkeypatch, capsys):
+        """When every dump attempt failed there is no file to inspect."""
+        monkeypatch.setattr(unlock_qrio, "TMP_CURRENT", str(tmp_path / "ui_current.xml"))
+        monkeypatch.setattr(unlock_qrio, "check_lock_status", lambda verbose=True: None)
+        monkeypatch.setattr(sys, "argv", ["unlock_qrio.py", "--status"])
+
+        with pytest.raises(SystemExit) as exc:
+            unlock_qrio.main()
+
+        out = capsys.readouterr().out
+        assert "No UI dump available" in out
+        assert "kept at" not in out
+        assert exc.value.code == 1
+
+    def test_reports_dump_path_when_present(self, tmp_path, monkeypatch, capsys):
+        """A pulled dump is advertised for inspection."""
+        dump = tmp_path / "ui_current.xml"
+        dump.write_text(LOCKED_XML)
+        monkeypatch.setattr(unlock_qrio, "TMP_CURRENT", str(dump))
+        monkeypatch.setattr(unlock_qrio, "check_lock_status", lambda verbose=True: "Locked")
+        monkeypatch.setattr(sys, "argv", ["unlock_qrio.py", "--status"])
+
+        with pytest.raises(SystemExit) as exc:
+            unlock_qrio.main()
+
+        assert f"kept at {dump}" in capsys.readouterr().out
+        assert exc.value.code == 0
 
 
 class TestAdbAvailability:
